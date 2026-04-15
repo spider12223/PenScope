@@ -1,4 +1,4 @@
-// PenScope v5.8 — Popup Logic
+// PenScope v5.9 — Popup Logic
 let tabId=null,D=null;
 
 // Delegated click handler for all interactive elements (MV3 CSP compliant — no inline onclick)
@@ -231,6 +231,40 @@ function renderLinks(links,filter=""){const c=document.getElementById("rL");let 
 // DEEP TAB — v5: all data + CDP domains
 // -------------------------------------------------------
 function renderDeep(){const c=document.getElementById("rD");if(!D.deepEnabled&&!D.responseBodies?.length&&!D.xssSinks?.length&&!D.pathParams?.length){c.innerHTML=empty("🔬",'Click <span style="color:var(--purple);font-weight:700">Deep</span> to enable.');return;}try{let h="";
+// ---- v5.9: ATTACK CHAINS — the headline feature. Compound exploit chains rendered at the TOP ----
+if(D.exploitChains?.length){
+  const chains=D.exploitChains;
+  const critical=chains.filter(c2=>c2.severity==="critical").length;
+  const high=chains.filter(c2=>c2.severity==="high").length;
+  h+=`<div class="hs" style="border-left:3px solid var(--red);background:linear-gradient(90deg,rgba(255,58,92,.08),transparent)"><div class="hs-t" style="color:var(--red);font-size:13px">🎯 Attack Chains — ${chains.length} prioritized exploit paths${critical?` (${critical} CRITICAL`:""}${high?`, ${high} HIGH`:""}${critical||high?")":""}</div>`;
+  h+=`<div style="padding:6px 16px;font-size:10px;color:var(--t2)">These are compound findings where multiple signals chain into something worse than any individual bug. Sorted by severity × confidence. Start here.</div>`;
+  chains.slice(0,20).forEach((chain,idx)=>{
+    const sevColor=chain.severity==="critical"?"var(--red)":chain.severity==="high"?"var(--orange)":chain.severity==="medium"?"var(--yellow)":"var(--t3)";
+    // Proper CSS custom property with alpha — `var(--red)15` is invalid (color var can't be
+    // concatenated with a hex alpha), so use the pre-defined rgba background vars.
+    const sevBg=chain.severity==="critical"?"var(--crit-bg)":chain.severity==="high"?"var(--high-bg)":chain.severity==="medium"?"var(--med-bg)":"var(--info-bg)";
+    const confPct=Math.round((chain.confidence||0.5)*100);
+    h+=`<div style="padding:10px 16px;border-top:1px solid var(--glassbrd);border-left:2px solid ${sevColor};margin:6px 0 0 0">`;
+    h+=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">`;
+    h+=`<span style="font-size:11px;font-weight:700;color:${sevColor};padding:3px 8px;border-radius:4px;background:${sevBg};text-transform:uppercase">${esc(chain.severity)}</span>`;
+    h+=`<span style="font-weight:700;font-size:12px;color:var(--t1);flex:1">${esc(chain.title)}</span>`;
+    h+=`<span style="font-size:9px;color:var(--t3);font-family:var(--mono)">${confPct}% conf</span>`;
+    h+=`</div>`;
+    h+=`<div style="font-size:10px;color:var(--t2);line-height:1.5;margin-bottom:6px">${esc(chain.summary)}</div>`;
+    if(chain.reproCmd){
+      h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--green);background:rgba(58,255,138,.05);padding:6px 8px;border-radius:6px;border:1px solid rgba(58,255,138,.15);margin-top:4px;white-space:pre-wrap;word-break:break-all;cursor:pointer" data-copy="${escA(chain.reproCmd)}">${esc(chain.reproCmd.substring(0,600))}</div>`;
+    }
+    if(chain.nextSteps&&chain.nextSteps.length){
+      h+=`<div style="font-size:10px;color:var(--t3);margin-top:6px">Next steps:</div>`;
+      chain.nextSteps.slice(0,5).forEach(step=>{
+        h+=`<div style="padding:1px 0 1px 14px;font-size:10px;color:var(--t2)">→ ${esc(step)}</div>`;
+      });
+    }
+    h+=`</div>`;
+  });
+  if(chains.length>20)h+=`<div style="padding:6px 16px;font-size:10px;color:var(--t3)">Showing 20 of ${chains.length}</div>`;
+  h+=`</div>`;
+}
 // XSS Sinks
 if(D.xssSinks?.length){h+=`<div class="hs"><div class="hs-t" style="color:var(--red)">DOM XSS Sinks (${D.xssSinks.length})</div>`;D.xssSinks.slice(0,100).forEach(s=>{h+=`<div class="fi"><div class="fi-h"><span class="sev sev-${escA(s.severity)}">${s.severity}</span><span class="fi-t">${esc(s.name)}</span></div><div style="font-size:10px;color:var(--t2)">${esc(s.description)}</div><div class="fi-v">${esc(s.context)}</div></div>`;});if(D.xssSinks.length>100)h+=`<div style="padding:4px 16px;font-size:10px;color:var(--t3)">Showing 100 of ${D.xssSinks.length}</div>`;h+=`</div>`;}
 // PostMessage listeners
@@ -1625,6 +1659,88 @@ if(ar&&ar.status==="done"){
     h+=`</div>`;
   }
 
+  // v5.9: Parameter Discovery — hidden query parameter fuzzer
+  const paramDisc=ar.paramDiscovery||[];
+  if(paramDisc.length){
+    h+=`<div class="hs"><div class="hs-t" style="color:var(--yellow)">🔎 Parameter Discovery (${paramDisc.length} endpoints with hidden params)</div>`;
+    paramDisc.forEach(pd=>{
+      h+=`<div class="deep-finding"><div class="fi-h"><span class="sev sev-${escA(pd.severity||"medium")}">${esc(pd.severity||"medium")}</span><span class="fi-t">${esc(pd.path)}</span><span style="font-size:9px;color:var(--t3);margin-left:auto">baseline ${pd.baseSize}B</span></div>`;
+      (pd.discovered||[]).forEach(d=>{
+        const deltaColor=Math.abs(d.delta)>500?"var(--red)":"var(--yellow)";
+        h+=`<div style="padding:2px 0 2px 14px;font-family:var(--mono);font-size:9px"><span style="color:${deltaColor};font-weight:700">${esc(d.param)}=${esc(d.value)}</span> <span style="color:var(--t3)">→ ${d.testSize}B (${d.delta>0?"+":""}${d.delta}B delta)</span></div>`;
+      });
+      if(pd.note)h+=`<div class="fi-m">${esc(pd.note)}</div>`;
+      h+=`</div>`;
+    });
+    h+=`</div>`;
+  }
+
+  // v5.9: SSTI Probing — server-side template injection
+  const ssti=ar.sstiResults||[];
+  if(ssti.length){
+    h+=`<div class="hs"><div class="hs-t" style="color:var(--red);font-size:13px">💣 SSTI (Server-Side Template Injection) — ${ssti.length} CONFIRMED</div>`;
+    ssti.forEach(s=>{
+      h+=`<div class="deep-finding"><div class="fi-h"><span class="sev sev-critical">critical</span><span class="fi-t">${esc(s.engine)} on ${esc(s.path)}</span></div>`;
+      h+=`<div class="fi-m">Parameter: <span style="color:var(--yellow);font-family:var(--mono)">${esc(s.param)}</span></div>`;
+      h+=`<div class="fi-m">Payload: <span style="color:var(--red);font-family:var(--mono)" data-copy="${escA(s.payload)}">${esc(s.payload)}</span> → Evaluated to <span style="color:var(--green)">${esc(s.expected)}</span></div>`;
+      if(s.note)h+=`<div class="fi-m" style="color:var(--red);font-weight:700">${esc(s.note)}</div>`;
+      h+=`</div>`;
+    });
+    h+=`</div>`;
+  }
+
+  // v5.9: XXE — XML External Entity
+  const xxe=ar.xxeResults||[];
+  if(xxe.length){
+    const confirmed=xxe.filter(x=>x.reflected);
+    h+=`<div class="hs"><div class="hs-t" style="color:${confirmed.length?"var(--red)":"var(--orange)"}">📰 XXE — ${confirmed.length} confirmed / ${xxe.length} probed</div>`;
+    xxe.forEach(x=>{
+      h+=`<div class="deep-finding"><div class="fi-h"><span class="sev sev-${x.severity}">${x.severity}</span><span class="fi-t">${esc(x.path)}</span><span style="font-size:9px;color:var(--t3);margin-left:auto">${x.status}</span></div>`;
+      if(x.note)h+=`<div class="fi-m">${esc(x.note)}</div>`;
+      h+=`</div>`;
+    });
+    h+=`</div>`;
+  }
+
+  // v5.9: CRLF injection
+  const crlf=ar.crlfResults||[];
+  if(crlf.length){
+    h+=`<div class="hs"><div class="hs-t" style="color:var(--red)">✂️ CRLF Injection — ${crlf.length} confirmed</div>`;
+    crlf.forEach(c=>{
+      h+=`<div class="deep-finding"><div class="fi-h"><span class="sev sev-critical">critical</span><span class="fi-t">${esc(c.path)}</span></div>`;
+      h+=`<div class="fi-m">Parameter: <span style="color:var(--yellow);font-family:var(--mono)">${esc(c.param)}</span></div>`;
+      if(c.note)h+=`<div class="fi-m" style="color:var(--red);font-weight:700">${esc(c.note)}</div>`;
+      h+=`</div>`;
+    });
+    h+=`</div>`;
+  }
+
+  // v5.9: API Version Downgrade
+  const verDown=ar.versionDowngrade||[];
+  if(verDown.length){
+    h+=`<div class="hs"><div class="hs-t" style="color:var(--orange)">⏪ API Version Downgrade — ${verDown.length} older versions reachable</div>`;
+    verDown.forEach(v=>{
+      h+=`<div class="deep-finding"><div class="fi-h"><span class="sev sev-${v.severity}">${v.severity}</span><span class="fi-t">v${v.originalVersion} → v${v.testedVersion}</span><span style="font-size:9px;color:var(--t3);margin-left:auto">${v.status} · ${fmtSize(v.size)}</span></div>`;
+      h+=`<div class="fi-m" style="font-family:var(--mono)"><span style="color:var(--t3)">was:</span> ${esc(v.originalPath)}</div>`;
+      h+=`<div class="fi-m" style="font-family:var(--mono);color:var(--yellow)"><span style="color:var(--t3)">now:</span> <span data-copy="${escA(v.downgradedPath)}">${esc(v.downgradedPath)}</span></div>`;
+      if(v.note)h+=`<div class="fi-m">${esc(v.note)}</div>`;
+      h+=`</div>`;
+    });
+    h+=`</div>`;
+  }
+
+  // v5.9: Proto pollution exploitation
+  const pp=ar.protoPollution||[];
+  if(pp.length){
+    h+=`<div class="hs"><div class="hs-t" style="color:var(--red)">🧬 Proto Pollution — ${pp.length} endpoints</div>`;
+    pp.forEach(p=>{
+      h+=`<div class="deep-finding"><div class="fi-h"><span class="sev sev-${p.severity}">${p.severity}</span><span class="fi-t">${esc(p.path)}</span><span style="font-size:9px;color:var(--t3);margin-left:auto">${p.status}</span></div>`;
+      if(p.note)h+=`<div class="fi-m" style="color:var(--red)">${esc(p.note)}</div>`;
+      h+=`</div>`;
+    });
+    h+=`</div>`;
+  }
+
   // v5.7: Recursive API Discovery — the wave-by-wave breakdown with inline findings
   const rp=ar.recursiveProbe;
   if(rp&&(rp.wave1?.length||rp.wave2?.length||rp.wave3?.length)){
@@ -1802,9 +1918,28 @@ function updateFooter(){if(D?.startTime){const s=Math.floor((Date.now()-D.startT
 // opts.format: "claude" (clipboard, concise) or "markdown" (download, verbose)
 // -------------------------------------------------------
 function buildReport(opts){const v=opts.format==="markdown";const tgtUrl=document.getElementById("tgtUrl").textContent||D.url||"?";const hasDeepData=(D.responseBodies?.length||0)+(D.consoleLogs?.length||0)+(D.auditIssues?.length||0)+(D.scriptSources?.length||0)+(D.executionContexts?.length||0)+(D.discoveredRoutes?.length||0)>0;
-let r=`# PenScope v5.8 Recon Report\n**Target:** ${tgtUrl}\n**Time:** ${new Date().toISOString()}\n**Deep:** ${hasDeepData?"ON (data captured)":D.deepEnabled?"ON":"OFF"}\n`;
+let r=`# PenScope v5.9 Recon Report\n**Target:** ${tgtUrl}\n**Time:** ${new Date().toISOString()}\n**Deep:** ${hasDeepData?"ON (data captured)":D.deepEnabled?"ON":"OFF"}\n`;
 if(v)r+=`**Endpoints:** ${D.endpoints?.length||0} | **Secrets:** ${D.secrets?.length||0} | **Script Findings:** ${D.scriptSources?.length||0} | **Discovered Routes:** ${D.discoveredRoutes?.length||0} | **Audit Issues:** ${D.auditIssues?.length||0}\n\n---\n\n`;
 else r+=`**Discovered Routes:** ${D.discoveredRoutes?.length||0} (endpoints found in code but never called)\n\nAnalyze all findings. Prioritize: XSS sinks, IDOR path params, missing auth, error disclosures, JSONP, mixed content. For discovered routes — identify admin panels, auth endpoints, and destructive actions to test.\n\n---\n\n`;
+// v5.9: Attack Chains at the TOP of every report — the highest-signal findings first.
+// This is what a hunter should read BEFORE the raw endpoint dumps below.
+if(D.exploitChains?.length){
+  r+=`## 🎯 Attack Chains — Prioritized Exploit Paths (${D.exploitChains.length})\n`;
+  r+=`These are compound findings ranked by severity × confidence. Start here.\n\n`;
+  D.exploitChains.slice(0,v?Infinity:15).forEach((chain,idx)=>{
+    r+=`### ${idx+1}. [${chain.severity.toUpperCase()}] ${chain.title} _(confidence: ${Math.round((chain.confidence||0.5)*100)}%)_\n\n`;
+    r+=`${chain.summary}\n\n`;
+    if(chain.reproCmd){
+      r+="```bash\n"+chain.reproCmd+"\n```\n\n";
+    }
+    if(chain.nextSteps?.length){
+      r+="**Next steps:**\n";
+      chain.nextSteps.forEach(s=>{r+=`- ${s}\n`;});
+      r+="\n";
+    }
+  });
+  r+=`---\n\n`;
+}
 if(D.techStack?.length){r+=`## Tech Stack\n`;D.techStack.forEach(t=>r+=`- **${t.name}** (${t.source})\n`);r+=`\n`;}
 if(D.dependencyVersions?.length){r+=`## Dependency Versions\n`;D.dependencyVersions.forEach(d=>r+=`- **${d.name}** v${d.version}\n`);r+=`\n`;}
 if(D.endpoints?.length){r+=`## Endpoints (${D.endpoints.length})\n\`\`\`\n`;D.endpoints.forEach(e=>{const tags=(e.tags||[]).map(t=>`[${t.tag}]`).join("");r+=`${(e.method||"GET").padEnd(v?8:7)}${e.status?(v?e.status+"  ":(" "+e.status).padEnd(5)):v?"     ":""} ${e.path}${e.query?(v?e.query:e.query.substring(0,40)):""} ${tags}${e.responseSize?" "+fmtSize(e.responseSize):""} [${e.type||""}]\n`;});r+=`\`\`\`\n\n`;}

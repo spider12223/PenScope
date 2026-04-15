@@ -1,4 +1,4 @@
-// PenScope v5.8 — Content Script
+// PenScope v5.9 — Content Script
 // 60+ secret patterns, 80+ tech fingerprints, 11 contextual scanners:
 //   Path param extraction, mixed content, SRI check,
 //   postMessage listeners, dependency versions, web workers,

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "PenScope",
-  "version": "5.8.0",
-  "description": "Passive recon + deep inspection + stealth probing + recursive API discovery + HAR import + Nuclei export + session persistence — one click to Claude",
+  "version": "5.9.0",
+  "description": "Passive recon + deep inspection + 36 probe attacks + attack chain correlator + SSTI/XXE/CRLF/ProtoPollution + real stealth + HAR import + Nuclei export — one click to Claude",
   "permissions": ["webRequest","activeTab","scripting","tabs","cookies","debugger"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },

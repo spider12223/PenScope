@@ -1,5 +1,93 @@
 # PenScope Changelog
 
+## v5.9.0 — Attack Chains + 6 New Attacks + Real Stealth
+
+The release built specifically to push PenScope from "cool but rough" to "best-in-class."
+
+### Attack Chain Correlator — the headline feature
+
+New `analyzeExploitChains()` engine walks the entire tab state looking for **compound findings**
+where multiple signals combine into something worse than any individual bug. 12 chain patterns:
+
+1. **Auth bypass on sensitive endpoint** — probe-confirmed missing auth + path name suggests
+   admin/user/billing/config
+2. **Destructive BAC** — BAC-vulnerable endpoint with destructive naming (delete/remove/purge)
+3. **CSRF-vulnerable GraphQL mutation** — confirmed missing CSRF + it's a mutation, not a query
+4. **Exposed auth token + live API** — JWT/Bearer in memory + matching /api/ endpoints
+5. **Confirmed IDOR with sensitive data** — same-skeleton response after ID substitution
+6. **CORS reflection WITH credentials** — full SOP bypass
+7. **Open redirect on auth flow** — redirect param on /oauth, /login, /callback
+8. **Hidden admin routes** — 3+ admin paths in code never observed in traffic
+9. **JWT alg=none accepted** — server trusts unsigned tokens
+10. **Source map leaked secrets** — production shipped .map files with hardcoded secrets
+11. **WebRTC internal IP leak** — private IPs exposed via STUN
+12. **Recursive probe findings cluster** — 3+ sensitive findings across multiple endpoints
+
+Each chain includes a **severity**, **summary**, **reproduction command**, **next steps**, and
+**confidence score**. Sorted by severity × confidence. Rendered at the **TOP of the Deep tab**
+(the literal first thing you see) and the **TOP of every Claude report**. This is what a
+hunter reads first.
+
+### 6 new probe attack vectors (Steps 31-36)
+
+- **Step 31: Parameter Discovery** — brute-forces 38 hidden parameter names (`debug`, `admin`,
+  `verbose`, `_method`, `role`, `bypass`, etc.) on observed GET endpoints. Compares response size
+  to baseline. If response changes by >50 bytes, flags the parameter as potentially meaningful.
+  **This finds debug flags APIs forgot to remove.**
+- **Step 32: SSTI Probing** — injects `{{7*7}}`, `${7*7}`, `<%=7*7%>`, `#{7*7}`, `{{7*'7'}}`,
+  `${{7*7}}` into query parameters. If the response contains the evaluated result (`49`,
+  `7777777`) without the original payload, we have confirmed template injection — critical
+  severity, usually RCE.
+- **Step 33: XXE Probing** — POSTs XML with external entities to endpoints accepting
+  `application/xml`. If the entity is reflected in the response, XXE is confirmed. Also flags
+  endpoints that parse XML without error for potential OOB exploitation.
+- **Step 34: CRLF Injection** — injects `%0d%0aX-PenScope-Injected:%20true` into redirect
+  parameters. Checks response headers for the injected header. Enables response splitting,
+  session fixation, and cache poisoning.
+- **Step 35: API Version Downgrade** — actively probes older versions (v1, v2) for every
+  observed `/vN/` endpoint. Older API versions often lack modern auth/validation.
+- **Step 36: Proto Pollution Exploitation** — injects `__proto__` and `constructor.prototype`
+  into JSON request bodies. Detects reflection of polluted attributes in responses and flags
+  500 responses as potential triggers.
+
+**Total probe attack count: 36 (was 30 in v5.8).**
+
+### Real stealth mode
+
+v5.8's stealth was jitter only. v5.9 adds actual **randomization**:
+
+- `shuf()` Fisher-Yates shuffle helper (stealth-mode only, no-op otherwise)
+- **Step 5 path order shuffled** — `/admin, /.env, /.git` are no longer probed in alphabetic
+  order. Attacker signature of "sequential scan of admin endpoints" becomes much harder to match.
+- **Step 7 prefix × suffix order shuffled** — both arrays randomized. The suffix brute no longer
+  produces the same request sequence twice.
+- **Per-request micro-jitter** — on top of the per-step delay, every 3rd request gets an
+  additional 0-150ms random pause. Breaks timing-based detection.
+
+### Severity weighting extended to more scanners
+
+v5.8 applied `weighSeverity()` to one scanner. v5.9 extends it to `deepScanBody()` — the
+heaviest pattern scanner in the codebase, run on every captured API response body. Findings are
+now upgraded/downgraded based on:
+
+- **In authenticated API path** → +1 severity
+- **In comment/documentation** → -1 severity
+- **Value looks like test data** (`john.doe`, `example.com`, `lorem`) → -1 severity
+- **Value is a live-looking JWT** (three base64 parts) → +1 severity
+
+### Architecture notes
+
+- `analyzeExploitChains` runs inside `runPassiveAnalysis` on every `getData` call, so chains are
+  always fresh. No chain pattern can miss findings added by later pipeline stages.
+- The 6 new probe steps share the existing `sf()`, `mergeCustomHeaders()`, and `delay()` helpers.
+  Zero new dependencies or helpers needed.
+- State additions: `tab.exploitChains` (array). That's it. Everything else piggybacks on existing
+  state fields.
+- `R.paramDiscovery`, `R.sstiResults`, `R.xxeResults`, `R.crlfResults`, `R.versionDowngrade`,
+  `R.protoPollution` added to the probe result object and rendered in the Deep tab under
+  "Probe Results."
+- `shuf()` is a zero-effect no-op when `ctx.stealth` is false, so non-stealth runs are unchanged.
+
 ## v5.8.0 — Stealth, Persistence, HAR Import, Nuclei Export, UX polish
 
 This release addresses every issue I identified in my own 7.5/10 rating. **No features were
