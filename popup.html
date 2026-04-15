@@ -115,7 +115,13 @@
   .fi-v{font-family:var(--mono);font-size:10px;color:var(--yellow);background:var(--glass);backdrop-filter:blur(8px);padding:4px 8px;border-radius:6px;border:1px solid var(--glassbrd);overflow-x:auto;white-space:nowrap;margin-top:4px;cursor:pointer;transition:all .2s ease}.fi-v:hover{background:var(--glass3);border-color:var(--glassbrd2);box-shadow:0 0 12px rgba(255,197,58,.08)}
   .fi-m{font-size:9px;color:var(--t3);margin-top:3px}
 
-  .hs{padding:6px 16px}.hs-t{font-weight:700;font-size:11px;padding:8px 0;color:var(--t2);border-bottom:1px solid var(--glassbrd);margin-bottom:4px;letter-spacing:-.2px}
+  .hs{padding:6px 16px}.hs-t{font-weight:700;font-size:11px;padding:8px 0;color:var(--t2);border-bottom:1px solid var(--glassbrd);margin-bottom:4px;letter-spacing:-.2px;cursor:pointer;user-select:none;transition:color .15s ease}
+  #rD .hs-t::before{content:"▾ ";color:var(--t3);font-size:9px;margin-right:2px}
+  #rD .hs.collapsed>*:not(.hs-t){display:none !important}
+  #rD .hs.collapsed{padding-bottom:0}
+  #rD .hs.collapsed .hs-t::before{content:"▸ "}
+  #rD .hs.collapsed .hs-t{margin-bottom:0;border-bottom:none;opacity:.65}
+  #rD .hs-t:hover{color:var(--t1)}
   .hi{display:flex;align-items:flex-start;gap:6px;padding:4px 0;font-size:11px}.hi-n{font-family:var(--mono);font-size:10px;color:var(--t1);min-width:80px}.hi-d{color:var(--t2);font-size:10px;flex:1}.lv{font-family:var(--mono);color:var(--orange);font-size:10px}
 
   .empty{padding:40px 20px;text-align:center;color:var(--t3)}.empty-i{font-size:28px;margin-bottom:8px;opacity:.5}.empty-t{font-size:11px;color:var(--t3)}
@@ -177,7 +183,7 @@
 </head>
 <body>
   <div class="hdr">
-    <div class="hdr-l"><div class="logo">P</div><div class="title">Pen<em>Scope</em><span class="ver">v5.5</span></div></div>
+    <div class="hdr-l"><div class="logo">P</div><div class="title">Pen<em>Scope</em><span class="ver">v5.8</span></div></div>
     <div class="hdr-r">
       <div class="deep-wrap">
         <button class="btn btn-deep" id="btnDeep" style="border-radius:8px 0 0 8px">Deep</button>
@@ -190,14 +196,27 @@
       <div class="deep-wrap">
         <button class="btn btn-probe" id="btnProbe" title="Probe — sends requests (bug bounty mode)" style="border-radius:8px 0 0 8px">Probe</button>
         <button class="deep-drop-btn" id="btnProbeDrop" style="border-color:rgba(255,123,58,.3)">▾</button>
-        <div class="deep-menu" id="probeMenu">
+        <div class="deep-menu" id="probeMenu" style="min-width:300px">
           <div class="deep-item" data-aggro="careful" style="color:var(--green)">🟢 Careful — GET only, read-only</div>
           <div class="deep-item" data-aggro="medium" style="color:var(--yellow)">🟡 Medium — test auth, no modifications</div>
           <div class="deep-item" data-aggro="full" style="color:var(--red)">🔴 Full Send — test everything</div>
+          <div style="padding:8px 10px;border-top:1px solid var(--glassbrd);margin-top:4px">
+            <div style="font-size:9px;color:var(--t3);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Custom Headers</div>
+            <textarea id="probeHeaders" placeholder="Authorization: Bearer xxx&#10;X-API-Key: abc123&#10;X-Forwarded-For: 127.0.0.1" spellcheck="false" style="width:100%;min-height:60px;background:var(--glass2);border:1px solid var(--glassbrd);border-radius:6px;padding:6px 8px;color:var(--t1);font-family:var(--mono);font-size:10px;resize:vertical;outline:none;box-sizing:border-box"></textarea>
+            <div style="font-size:8px;color:var(--t3);margin-top:3px">Added to every probe request. One per line (Name: Value). Saved automatically.</div>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+              <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t2);cursor:pointer"><input type="checkbox" id="probeRecursive" checked style="accent-color:var(--orange)"> Smart recursive probing</label>
+              <span style="font-size:8px;color:var(--t3);margin-left:auto">Discovers APIs → probes them → extracts more APIs</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+              <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t2);cursor:pointer"><input type="checkbox" id="probeStealth" style="accent-color:var(--green)"> Stealth mode</label>
+              <span style="font-size:8px;color:var(--t3);margin-left:auto">Jitter + random pauses to evade WAFs</span>
+            </div>
+          </div>
         </div>
       </div>
       <button class="btn" id="btnExport">Export ▾</button>
-      <div class="exp-menu" id="exportMenu"><div class="exp-item" data-fmt="json">JSON (full data)</div><div class="exp-item" data-fmt="report">📄 Full Report (.md)</div><div class="exp-item" data-fmt="burp">Burp URL list</div><div class="exp-item" data-fmt="wordlist">Param wordlist</div><div class="exp-item" data-fmt="endpoints">Endpoints (txt)</div><div class="exp-item" data-fmt="swagger">🔧 Swagger Spec (.yaml)</div><div class="exp-item" data-fmt="sourcemaps">🗺️ Source Maps (JSON)</div></div>
+      <div class="exp-menu" id="exportMenu"><div class="exp-item" data-fmt="json">JSON (full data)</div><div class="exp-item" data-fmt="report">📄 Full Report (.md)</div><div class="exp-item" data-fmt="burp">Burp URL list</div><div class="exp-item" data-fmt="wordlist">Param wordlist</div><div class="exp-item" data-fmt="endpoints">Endpoints (txt)</div><div class="exp-item" data-fmt="swagger">🔧 Swagger Spec (.yaml)</div><div class="exp-item" data-fmt="sourcemaps">🗺️ Source Maps (JSON)</div><div class="exp-item" data-fmt="nuclei">⚔️ Nuclei Templates (.yaml)</div><div class="exp-item" data-fmt="har-import" style="border-top:1px solid var(--glassbrd);margin-top:4px;padding-top:8px;color:var(--teal)">📥 Import HAR...</div></div>
       <button class="btn" id="btnClear">Clear</button>
       <button class="btn btn-main" id="btnScan">⟳ Scan</button>
       <button class="btn btn-claude" id="btnClaude">→ Claude</button>
@@ -233,10 +252,17 @@
   <div class="tc" id="t-tech"><div id="rT"></div></div>
   <div class="tc" id="t-storage"><div id="rSt"></div></div>
   <div class="tc" id="t-links"><div class="flt"><input id="fL" placeholder="Filter links..."></div><div id="rL"></div></div>
-  <div class="tc" id="t-deep"><div id="rD"></div></div>
+  <div class="tc" id="t-deep">
+    <div style="display:flex;gap:6px;padding:6px 16px;align-items:center;border-bottom:1px solid var(--glassbrd)">
+      <input id="fD" placeholder="Filter Deep findings..." style="flex:1;background:var(--glass);backdrop-filter:blur(10px);border:1px solid var(--glassbrd2);border-radius:8px;padding:6px 10px;color:var(--t1);font-family:var(--mono);font-size:10px;outline:none">
+      <button class="btn" id="dExpAll" title="Expand all sections" style="font-size:9px;padding:4px 8px">⊕ All</button>
+      <button class="btn" id="dColAll" title="Collapse all sections" style="font-size:9px;padding:4px 8px">⊖ All</button>
+    </div>
+    <div id="rD"></div>
+  </div>
   <div class="tc" id="t-console"><div class="flt"><input id="fC" placeholder="Filter console logs..."></div><div id="rC"></div></div>
   <div class="toast" id="toast">Copied!</div>
-  <div class="ftr"><span id="fTime">—</span><span>PenScope v5.5 — Deep + Probe + 29 Attack Vectors</span></div>
+  <div class="ftr"><span id="fTime">—</span><span>PenScope v5.8 — Stealth Probing + HAR Import + Nuclei Export + Session Persistence</span></div>
   <div class="smap-overlay" id="smapOverlay">
     <div class="smap-panel">
       <div class="smap-title">🗺️ Source Map Scanner</div>

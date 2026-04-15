@@ -1,4 +1,4 @@
-// PenScope v5.5 — Popup Logic
+// PenScope v5.8 — Popup Logic
 let tabId=null,D=null;
 
 // Delegated click handler for all interactive elements (MV3 CSP compliant — no inline onclick)
@@ -34,12 +34,100 @@ probeMenu.querySelectorAll("[data-aggro]").forEach(i=>i.addEventListener("click"
 document.getElementById("smapClose").addEventListener("click",()=>{document.getElementById("smapOverlay").classList.remove("show");});
 document.getElementById("smapOverlay").addEventListener("click",e=>{if(e.target.id==="smapOverlay")e.target.classList.remove("show");});
 document.getElementById("smapDownloadAll").addEventListener("click",downloadAllSourceMaps);
+// v5.7: Load saved custom headers and probe preferences from chrome.storage.local
+try{chrome.storage.local.get(["penscopeCustomHeaders","penscopeRecursive","penscopeStealth"],r=>{
+  const hdrEl=document.getElementById("probeHeaders");
+  if(hdrEl&&r.penscopeCustomHeaders)hdrEl.value=r.penscopeCustomHeaders;
+  const recEl=document.getElementById("probeRecursive");
+  if(recEl&&typeof r.penscopeRecursive==="boolean")recEl.checked=r.penscopeRecursive;
+  const stlEl=document.getElementById("probeStealth");
+  if(stlEl&&typeof r.penscopeStealth==="boolean")stlEl.checked=r.penscopeStealth;
+});}catch(e){}
+const hdrTextarea=document.getElementById("probeHeaders");
+if(hdrTextarea){
+  hdrTextarea.addEventListener("click",e=>e.stopPropagation());
+  hdrTextarea.addEventListener("input",e=>{
+    try{chrome.storage.local.set({penscopeCustomHeaders:e.target.value});}catch(err){}
+  });
+}
+const recCb=document.getElementById("probeRecursive");
+if(recCb){
+  recCb.addEventListener("click",e=>e.stopPropagation());
+  recCb.addEventListener("change",e=>{
+    try{chrome.storage.local.set({penscopeRecursive:e.target.checked});}catch(err){}
+  });
+}
+const stCb=document.getElementById("probeStealth");
+if(stCb){
+  stCb.addEventListener("click",e=>e.stopPropagation());
+  stCb.addEventListener("change",e=>{
+    try{chrome.storage.local.set({penscopeStealth:e.target.checked});}catch(err){}
+  });
+}
+// v5.8: Deep tab filter — hide/show sections by substring match
+const fDeep=document.getElementById("fD");
+if(fDeep){
+  fDeep.addEventListener("input",e=>{
+    const f=(e.target.value||"").toLowerCase();
+    const c=document.getElementById("rD");
+    if(!c)return;
+    const sections=c.querySelectorAll(".hs");
+    if(!f){sections.forEach(s=>{s.style.display="";});return;}
+    sections.forEach(s=>{
+      const text=(s.textContent||"").toLowerCase();
+      s.style.display=text.indexOf(f)>-1?"":"none";
+    });
+  });
+}
+// v5.8: Deep tab collapse-all / expand-all buttons
+document.getElementById("dExpAll")?.addEventListener("click",()=>{
+  document.querySelectorAll("#rD .hs").forEach(s=>s.classList.remove("collapsed"));
+  _collapsedSections.clear();
 });
+document.getElementById("dColAll")?.addEventListener("click",()=>{
+  document.querySelectorAll("#rD .hs").forEach(s=>{
+    s.classList.add("collapsed");
+    const t=s.querySelector(".hs-t")?.textContent||"";
+    if(t)_collapsedSections.add(t);
+  });
+});
+// v5.8: Deep tab collapsible sections — click title to toggle, persisted within session
+document.addEventListener("click",e=>{
+  const t=e.target.closest("#rD .hs-t");
+  if(!t)return;
+  if(e.target.closest("button, input, textarea, a, [data-copy], [data-copytext], [data-toggle], [data-dlmap], [data-decodeidx]"))return;
+  const hs=t.parentElement;
+  if(hs&&hs.classList.contains("hs")){
+    hs.classList.toggle("collapsed");
+    const title=t.textContent||"";
+    if(hs.classList.contains("collapsed"))_collapsedSections.add(title);
+    else _collapsedSections.delete(title);
+  }
+});
+});
+// v5.8: Track collapsed section titles so re-renders preserve state
+const _collapsedSections=new Set();
 
 function load(){chrome.runtime.sendMessage({action:"getData",tabId},data=>{if(!data)return;D=data;updateDeepUI(data.deepEnabled);updateProbeUI(data.probeData);updateStats();renderEndpoints(data.endpoints||[]);renderSecrets(data.secrets||[]);renderHidden(data.hiddenFields||[]);renderHeaders(data.headers||[]);renderForms(data.forms||[]);renderTech(data.techStack||[]);renderStorage(data.storageData||{});renderLinks(data.links||[]);renderDeep();renderConsole();updateFooter();});}
 function toggleDeep(){const btn=document.getElementById("btnDeep");if(btn.classList.contains("active")){chrome.runtime.sendMessage({action:"disableDeep",tabId},()=>{btn.classList.remove("active");document.getElementById("deepBar").classList.remove("show");});}else{chrome.runtime.sendMessage({action:"enableDeep",tabId},r=>{if(r?.ok){btn.classList.add("active");document.getElementById("deepBar").classList.add("show");toast("Deep ON — reload for full capture");}else toast("Debugger failed");});}}
 function updateDeepUI(on){if(on){document.getElementById("btnDeep").classList.add("active");document.getElementById("deepBar").classList.add("show");}else{document.getElementById("btnDeep").classList.remove("active");document.getElementById("deepBar").classList.remove("show");}}
 function toggleProbe(){startProbeWithLevel("medium");}
+// v5.7: Parse custom header textarea into {name: value} object. One header per line,
+// "Name: value" format. Lines starting with # are comments. Skips malformed lines silently.
+function parseCustomHeaders(text){
+  const headers={};
+  if(!text||typeof text!=="string")return headers;
+  text.split(/\r?\n/).forEach(line=>{
+    line=line.trim();
+    if(!line||line.charAt(0)==="#")return;
+    const colonIdx=line.indexOf(":");
+    if(colonIdx<1)return;
+    const name=line.substring(0,colonIdx).trim();
+    const value=line.substring(colonIdx+1).trim();
+    if(name&&value&&name.length<200&&value.length<2000)headers[name]=value;
+  });
+  return headers;
+}
 function startProbeWithLevel(level){
   const btn=document.getElementById("btnProbe");
   if(btn.classList.contains("running")){toast("Active recon is running...");return;}
@@ -47,14 +135,23 @@ function startProbeWithLevel(level){
   btn.classList.add("running");btn.textContent="Active ⏳";
   document.getElementById("probeBar").classList.add("show");
   const levelLabels={careful:"🟢 Careful — GET only",medium:"🟡 Medium — testing auth",full:"🔴 Full Send — testing everything"};
-  document.getElementById("probeStatus").textContent=`Running ${levelLabels[level]||level}...`;
-  chrome.runtime.sendMessage({action:"startProbe",tabId,aggroLevel:level},r=>{
+  const hdrEl=document.getElementById("probeHeaders");
+  const customHeaders=parseCustomHeaders(hdrEl?.value||"");
+  const hdrCount=Object.keys(customHeaders).length;
+  const recursiveEl=document.getElementById("probeRecursive");
+  const recursive=recursiveEl?recursiveEl.checked:true;
+  const stealthEl=document.getElementById("probeStealth");
+  const stealth=stealthEl?stealthEl.checked:false;
+  document.getElementById("probeStatus").textContent=`Running ${levelLabels[level]||level}${hdrCount?" + "+hdrCount+" custom headers":""}${recursive?" + recursive":""}${stealth?" + stealth":""}...`;
+  chrome.runtime.sendMessage({action:"startProbe",tabId,aggroLevel:level,customHeaders,recursive,stealth},r=>{
     btn.classList.remove("running");
     if(r?.ok){
       btn.classList.add("done");btn.textContent="Active ✓";
       const ar=r.results||{};
-      document.getElementById("probeStatus").textContent=`Done (${level}) — ${ar.requests||0} requests sent`;
-      toast(`Probe done! ${ar.requests||0} requests`);
+      const rp=ar.recursiveProbe||{};
+      const rpTotal=(rp.wave1?.length||0)+(rp.wave2?.length||0)+(rp.wave3?.length||0);
+      document.getElementById("probeStatus").textContent=`Done (${level}) — ${ar.requests||0} requests${rpTotal?`, ${rpTotal} recursive hits`:""}`;
+      toast(`Probe done! ${ar.requests||0} requests${rpTotal?` · ${rpTotal} recursive`:""}`);
       setTimeout(load,500);
     }else{
       btn.textContent="Probe ✗";
@@ -72,7 +169,51 @@ function updateProbeUI(ar){
   else if(ar.status==="done"){btn.classList.add("done");btn.textContent="Active ✓";document.getElementById("probeBar").classList.add("show");document.getElementById("probeStatus").textContent=`Done — ${ar.requests||0} requests sent`;}
   else if(ar.status==="error"){btn.textContent="Probe ✗";document.getElementById("probeBar").classList.add("show");document.getElementById("probeStatus").textContent=`Error: ${(ar.error||"unknown").substring(0,100)}`;}
 }
-function updateStats(){const ep=D.endpoints?.length||0,se=D.secrets?.length||0,hf=D.hiddenFields?.length||0;let issues=0;(D.headers||[]).forEach(h=>{issues+=(h.missing?.length||0)+(h.leaks?.length||0)+(h.corsIssues?.length||0)+(h.cookieIssues?.length||0);if(h.cspAnalysis)issues+=h.cspAnalysis.issues?.length||0;});const deep=(D.responseBodies?.length||0)+(D.requestHeaders?.length||0)+(D.wsMessages?.length||0)+(D.errorBodies?.length||0)+(D.redirectChains?.length||0)+(D.apiVersions?.length||0)+(D.swaggerEndpoints?.length||0)+(D.xssSinks?.length||0)+(D.mixedContent?.length||0)+(D.missingSRI?.length||0)+(D.postMessageListeners?.length||0)+(D.pathParams?.length||0)+(D.jsonpEndpoints?.length||0)+(D.methodSuggestions?.length||0)+(D.reconSuggestions?.length||0)+(D.certInfo?1:0)+(D.scriptSources?.length||0)+(D.consoleLogs?.length||0)+(D.auditIssues?.length||0)+(D.executionContexts?.length||0)+(D.discoveredRoutes?.length||0)+(D.jwtFindings?.length||0)+(D.permissionMatrix?.length||0)+(D.idorTests?.length||0)+(D.indexedDBData?.length||0)+(D.cacheStorageData?.length||0)+(D.postBodies?.length||0)+(D.apiResponseBodies?.length||0)+(D.coverageData?1:0)+(D.domListeners?.length||0)+(D.shadowDOMData?.length||0)+(D.memoryStrings?.length||0)+(D.encodedBlobs?.length||0)+(D.dnsPrefetch?.length||0)+(D.iframeScan?.length||0)+(D.headerIntel?.length||0)+(D.perfEntries?.length||0)+(D.cssContent?.length||0)+(D.grpcEndpoints?.length||0)+(D.wasmModules?.length||0)+(D.webrtcLeaks?.length||0)+(D.broadcastChannels?.length||0)+(D.webAuthnInfo?.supported?1:0)+(D.compressionResults?.length||0)+(D.grpcReflection?1:0)+(D.wsHijackResults?.length||0)+(D.cachePoisonProbe?.length||0)+(D.timingOracle?.length||0)+(D.coopCoepInfo?1:0)+(D.storagePartition?.length||0)+(D.webgpuInfo?.supported?1:0);document.getElementById("sE").textContent=ep;document.getElementById("sS").textContent=se;document.getElementById("sH").textContent=hf;document.getElementById("sI").textContent=issues;document.getElementById("sD").textContent=deep;document.getElementById("bE").textContent=ep;document.getElementById("bS").textContent=se;document.getElementById("bH").textContent=hf;document.getElementById("bI").textContent=issues;document.getElementById("bF").textContent=D.forms?.length||0;document.getElementById("bT").textContent=D.techStack?.length||0;document.getElementById("bSt").textContent=Object.keys(D.storageData?.local||{}).length+Object.keys(D.storageData?.session||{}).length;document.getElementById("bL").textContent=D.links?.length||0;document.getElementById("bD").textContent=deep;document.getElementById("bC").textContent=D.consoleLogs?.length||0;}
+function updateStats(){
+  const ep=D.endpoints?.length||0,se=D.secrets?.length||0,hf=D.hiddenFields?.length||0;
+  let issues=0;
+  (D.headers||[]).forEach(h=>{
+    issues+=(h.missing?.length||0)+(h.leaks?.length||0)+(h.corsIssues?.length||0)+(h.cookieIssues?.length||0);
+    if(h.cspAnalysis)issues+=h.cspAnalysis.issues?.length||0;
+  });
+  // Flatten deep-tab aggregator: sum of every field the Deep tab renders.
+  const deepSources=[
+    D.responseBodies,D.requestHeaders,D.wsMessages,D.errorBodies,D.redirectChains,
+    D.apiVersions,D.swaggerEndpoints,D.xssSinks,D.mixedContent,D.missingSRI,
+    D.postMessageListeners,D.pathParams,D.jsonpEndpoints,D.methodSuggestions,
+    D.reconSuggestions,D.scriptSources,D.consoleLogs,D.auditIssues,D.executionContexts,
+    D.discoveredRoutes,D.jwtFindings,D.permissionMatrix,D.idorTests,D.indexedDBData,
+    D.cacheStorageData,D.postBodies,D.apiResponseBodies,D.domListeners,D.shadowDOMData,
+    D.memoryStrings,D.encodedBlobs,D.dnsPrefetch,D.iframeScan,D.headerIntel,D.perfEntries,
+    D.cssContent,D.grpcEndpoints,D.wasmModules,D.webrtcLeaks,D.broadcastChannels,
+    D.compressionResults,D.wsHijackResults,D.cachePoisonProbe,D.timingOracle,
+    D.storagePartition,D.realEventListeners,D.httpOnlyCookies,D.responseSchemas,
+    D.heapSecrets,D.parsedSourceMaps,D.graphqlOps,D.symbolTable,D.harvestedMaps
+  ];
+  let deep=0;
+  for(let i=0;i<deepSources.length;i++){const s=deepSources[i];if(s&&s.length)deep+=s.length;}
+  if(D.certInfo)deep++;
+  if(D.coverageData)deep++;
+  if(D.webAuthnInfo?.supported)deep++;
+  if(D.grpcReflection)deep++;
+  if(D.coopCoepInfo)deep++;
+  if(D.webgpuInfo?.supported)deep++;
+  document.getElementById("sE").textContent=ep;
+  document.getElementById("sS").textContent=se;
+  document.getElementById("sH").textContent=hf;
+  document.getElementById("sI").textContent=issues;
+  document.getElementById("sD").textContent=deep;
+  document.getElementById("bE").textContent=ep;
+  document.getElementById("bS").textContent=se;
+  document.getElementById("bH").textContent=hf;
+  document.getElementById("bI").textContent=issues;
+  document.getElementById("bF").textContent=D.forms?.length||0;
+  document.getElementById("bT").textContent=D.techStack?.length||0;
+  document.getElementById("bSt").textContent=Object.keys(D.storageData?.local||{}).length+Object.keys(D.storageData?.session||{}).length;
+  document.getElementById("bL").textContent=D.links?.length||0;
+  document.getElementById("bD").textContent=deep;
+  document.getElementById("bC").textContent=D.consoleLogs?.length||0;
+}
 function fmtSize(b){if(!b||b<0)return"";if(b<1024)return b+"B";if(b<1048576)return(b/1024).toFixed(1)+"K";return(b/1048576).toFixed(1)+"M";}
 function statusClass(s){if(!s)return"";if(s<300)return"s2";if(s<400)return"s3";if(s<500)return"s4";return"s5";}
 
@@ -835,7 +976,7 @@ if(D.grpcEndpoints?.length){
   h+=`</div>`;
 }
 
-// ---- v5.4: WASM MODULES ----
+// ---- v5.4/5.6: WASM MODULES — now shows toolchain, top strings, crypto/mining flags ----
 if(D.wasmModules?.length){
   const wasmFiles=D.wasmModules.filter(w=>w.url);
   const capabilities=D.wasmModules.filter(w=>w.type==="capability");
@@ -843,15 +984,26 @@ if(D.wasmModules?.length){
   h+=`<div style="padding:4px 16px;font-size:9px;color:var(--t3)">WASM modules may contain sensitive algorithms, crypto operations, DRM logic, or license checks. Download and decompile with wasm2c or Ghidra.</div>`;
   if(capabilities.length){
     const cap=capabilities[0];
-    h+=`<div style="padding:4px 16px;font-size:10px;color:var(--t2)">Runtime: WASM=${cap.wasmSupported?"✓":"✗"} Streaming=${cap.streaming?"✓":"✗"} SIMD=${cap.simd?"✓":"✗"}</div>`;
+    h+=`<div style="padding:4px 16px;font-size:10px;color:var(--t2)">Runtime: WASM=${cap.wasmSupported?"✓":"✗"} Streaming=${cap.streaming?"✓":"✗"} SIMD=${cap.simd?"✓":"✗"} Threads=${cap.threads?"✓":"✗"} WebGPU=${cap.webgpu?"✓":"✗"}</div>`;
   }
   wasmFiles.forEach(w=>{
     const fname=(w.url||"").split("/").pop()?.split("?")[0]||w.url||"?";
-    h+=`<div style="padding:4px 16px;border-bottom:1px solid var(--glassbrd);font-family:var(--mono);font-size:10px;display:flex;align-items:center;gap:6px">`;
+    const hasCrypto=w.patterns?.crypto;const hasMining=w.patterns?.mining;
+    const toolchain=w.toolchain&&w.toolchain!=="unknown"?w.toolchain:null;
+    h+=`<div style="padding:6px 16px;border-bottom:1px solid var(--glassbrd)">`;
+    h+=`<div style="display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px">`;
     h+=`<span style="color:var(--orange);font-weight:700;font-size:9px;min-width:70px">${esc(w.source||"")}</span>`;
     h+=`<span style="color:var(--t1);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" data-copy="${escA(w.url)}">${esc(fname)}</span>`;
-    if(w.size)h+=`<span style="color:var(--t3);font-size:9px">${fmtSize(w.size)}</span>`;
+    if(w.fullSize||w.size)h+=`<span style="color:var(--t3);font-size:9px">${fmtSize(w.fullSize||w.size)}</span>`;
     if(w.duration)h+=`<span style="color:var(--t3);font-size:9px">${w.duration}ms</span>`;
+    if(hasCrypto)h+=`<span style="font-size:8px;padding:1px 5px;border-radius:3px;background:rgba(255,123,58,.1);color:var(--orange);font-weight:700">CRYPTO</span>`;
+    if(hasMining)h+=`<span style="font-size:8px;padding:1px 5px;border-radius:3px;background:rgba(255,58,92,.1);color:var(--red);font-weight:700">MINING</span>`;
+    h+=`</div>`;
+    if(toolchain)h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--purple);margin-top:2px">Toolchain: ${esc(toolchain)}</div>`;
+    if(w.magic)h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--t3);margin-top:2px">Magic: ${esc(w.magic)}</div>`;
+    if(w.signatures&&w.signatures.length)h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--teal);margin-top:2px">Signatures: ${w.signatures.slice(0,3).map(s=>esc(s)).join(" · ")}</div>`;
+    if(w.topStrings&&w.topStrings.length)h+=`<div style="font-family:var(--mono);font-size:8px;color:var(--t3);margin-top:3px;max-height:50px;overflow:auto;cursor:pointer" data-copytext="1">${w.topStrings.slice(0,12).map(s=>esc(s)).join(" · ")}</div>`;
+    if(w.hexDump)h+=`<div style="font-family:var(--mono);font-size:8px;color:var(--t3);background:var(--glass);padding:4px 8px;border-radius:6px;border:1px solid var(--glassbrd);margin-top:4px;max-height:80px;overflow:auto;white-space:pre;cursor:pointer" data-copy="${escA(w.hexDump)}">${esc(w.hexDump.substring(0,512))}</div>`;
     h+=`</div>`;
   });
   h+=`</div>`;
@@ -942,25 +1094,56 @@ if(D.webgpuInfo?.supported){
   h+=`</div>`;
 }
 
-// ---- v5.5: ENHANCED WASM (hex dump + crypto) ----
-const wasmWithDump=(D.wasmModules||[]).filter(w=>w.hexDump);
-if(wasmWithDump.length){
-  h+=`<div class="hs"><div class="hs-t" style="color:var(--coral)">⚙️ WASM Binary Analysis (${wasmWithDump.length} modules dumped)</div>`;
-  wasmWithDump.forEach(w=>{
-    const fname=(w.url||"").split("/").pop()?.split("?")[0]||"?";
-    const hasCrypto=w.patterns?.crypto;const hasMining=w.patterns?.mining;
-    const sevColor=hasMining?"var(--red)":hasCrypto?"var(--orange)":"var(--teal)";
+// ---- v5.6: GRAPHQL OPERATIONS — reconstructed schema from captured POST bodies ----
+if(D.graphqlOps?.length){
+  const queries=D.graphqlOps.filter(o=>o.type==="query");
+  const mutations=D.graphqlOps.filter(o=>o.type==="mutation");
+  const subs=D.graphqlOps.filter(o=>o.type==="subscription");
+  h+=`<div class="hs"><div class="hs-t" style="color:var(--pink)">🧬 GraphQL Operations (${D.graphqlOps.length} — ${queries.length}Q / ${mutations.length}M / ${subs.length}S) [PASSIVE]</div>`;
+  h+=`<div style="padding:4px 16px;font-size:9px;color:var(--t3)">Reconstructed from captured POST bodies without introspection. Mutations are highest priority — test each for missing auth, CSRF, IDOR on input IDs.</div>`;
+  const order={mutation:0,subscription:1,query:2};
+  [...D.graphqlOps].sort((a,b)=>(order[a.type]||3)-(order[b.type]||3)).slice(0,100).forEach(op=>{
+    const typeColor=op.type==="mutation"?"var(--red)":op.type==="subscription"?"var(--orange)":"var(--blue)";
     h+=`<div style="padding:6px 16px;border-bottom:1px solid var(--glassbrd)">`;
-    h+=`<div style="display:flex;align-items:center;gap:6px"><span style="color:${sevColor};font-weight:700;font-size:10px">${esc(fname)}</span>`;
-    h+=`<span style="font-size:9px;color:var(--t3)">${fmtSize(w.fullSize||w.size)}</span>`;
-    if(hasCrypto)h+=`<span style="font-size:8px;padding:1px 5px;border-radius:3px;background:rgba(255,123,58,.1);color:var(--orange)">CRYPTO</span>`;
-    if(hasMining)h+=`<span style="font-size:8px;padding:1px 5px;border-radius:3px;background:rgba(255,58,92,.1);color:var(--red)">MINING</span>`;
-    if(w.patterns?.signatures?.length)h+=`<span style="font-size:8px;color:var(--purple)">${w.patterns.signatures.slice(0,3).map(s=>esc(s)).join(", ")}</span>`;
+    h+=`<div style="display:flex;align-items:center;gap:6px">`;
+    h+=`<span style="font-size:9px;padding:2px 6px;border-radius:4px;background:${typeColor}22;color:${typeColor};font-weight:700;text-transform:uppercase">${esc(op.type)}</span>`;
+    h+=`<span style="font-family:var(--mono);font-size:11px;color:var(--t1);font-weight:600;cursor:pointer" data-copy="${escA(op.name)}">${esc(op.name)}</span>`;
+    if(op.path)h+=`<span style="font-family:var(--mono);font-size:9px;color:var(--t3);margin-left:auto">${esc(op.path)}</span>`;
     h+=`</div>`;
-    if(w.magic)h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--t3);margin-top:2px">Magic: ${esc(w.magic)}</div>`;
-    h+=`<div style="font-family:var(--mono);font-size:8px;color:var(--t3);background:var(--glass);padding:4px 8px;border-radius:6px;border:1px solid var(--glassbrd);margin-top:4px;max-height:80px;overflow:auto;white-space:pre;cursor:pointer" data-copy="${escA(w.hexDump)}">${esc(w.hexDump.substring(0,512))}</div>`;
+    if(op.fields?.length)h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--teal);margin-top:3px">Fields: ${op.fields.map(f=>esc(f)).join(", ")}</div>`;
+    if(op.variables?.length){
+      const varStr=op.variables.map(v=>esc(v)+(op.variableSample&&op.variableSample[v]?"="+esc(op.variableSample[v]):"")).join(", ");
+      h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--yellow);margin-top:2px">Variables: ${varStr}</div>`;
+    }
+    if(op.fragments?.length)h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--purple);margin-top:2px">Fragments: ${op.fragments.map(f=>esc(f)).join(", ")}</div>`;
+    if(op.queryPreview)h+=`<div style="font-family:var(--mono);font-size:9px;color:var(--t3);background:var(--glass);padding:4px 8px;border-radius:6px;border:1px solid var(--glassbrd);margin-top:4px;max-height:60px;overflow:auto;cursor:pointer" data-copy="${escA(op.queryPreview)}">${esc(op.queryPreview)}</div>`;
     h+=`</div>`;
   });
+  if(D.graphqlOps.length>100)h+=`<div style="padding:4px 16px;font-size:10px;color:var(--t3)">Showing 100 of ${D.graphqlOps.length}</div>`;
+  h+=`</div>`;
+}
+
+// ---- v5.6: SYMBOL TABLE — pre-minification identifiers from source map names arrays ----
+if(D.symbolTable?.length&&D.symbolTable[0]?.total){
+  const st=D.symbolTable[0];
+  h+=`<div class="hs"><div class="hs-t" style="color:var(--purple)">🔤 Symbol Table (${st.total} identifiers, ${st.interestingCount} interesting)</div>`;
+  h+=`<div style="padding:4px 16px;font-size:9px;color:var(--t3)">Pre-minification function/variable names from source-map <code>names</code> arrays. Interesting matches grep for admin/auth/secret/debug/bypass/role — these are real identifiers you'd otherwise only see by downloading + reading source.</div>`;
+  if(st.interesting?.length){
+    h+=`<div style="padding:4px 16px;font-size:10px;font-weight:700;color:var(--red)">Interesting (${st.interesting.length}):</div>`;
+    h+=`<div style="padding:4px 16px;font-family:var(--mono);font-size:10px;line-height:1.7;display:flex;flex-wrap:wrap;gap:4px">`;
+    st.interesting.slice(0,150).forEach(n=>{
+      const low=n.toLowerCase();
+      const c=/admin|sudo|root|backdoor|bypass|impersonat/.test(low)?"var(--red)":/auth|token|secret|password|credent|key|jwt/.test(low)?"var(--orange)":/debug|intern|hidden|private/.test(low)?"var(--yellow)":/role|permission|privileg/.test(low)?"var(--coral)":"var(--purple)";
+      h+=`<span style="padding:2px 6px;background:${c}15;color:${c};border-radius:4px;cursor:pointer" data-copy="${escA(n)}">${esc(n)}</span>`;
+    });
+    h+=`</div>`;
+  }
+  if(st.sample?.length>st.interesting?.length){
+    h+=`<div style="padding:4px 16px;font-size:10px;font-weight:700;color:var(--t2);cursor:pointer" data-toggle="next">Full sample (${Math.min(st.sample.length,500)} of ${st.total}) ▸</div>`;
+    h+=`<div style="display:none;padding:4px 16px;font-family:var(--mono);font-size:9px;color:var(--t2);line-height:1.6;max-height:300px;overflow-y:auto">`;
+    h+=st.sample.slice(0,500).map(n=>esc(n)).join(", ");
+    h+=`</div>`;
+  }
   h+=`</div>`;
 }
 
@@ -1442,6 +1625,71 @@ if(ar&&ar.status==="done"){
     h+=`</div>`;
   }
 
+  // v5.7: Recursive API Discovery — the wave-by-wave breakdown with inline findings
+  const rp=ar.recursiveProbe;
+  if(rp&&(rp.wave1?.length||rp.wave2?.length||rp.wave3?.length)){
+    const w1=rp.wave1||[],w2=rp.wave2||[],w3=rp.wave3||[];
+    const total=w1.length+w2.length+w3.length;
+    const allFindings=[...w1,...w2,...w3].flatMap(r=>(r.findings||[]).map(f=>({...f,sourceUrl:r.path})));
+    const totalFindings=allFindings.length;
+    const critical=allFindings.filter(f=>f.severity==="critical").length;
+    const okHits=[...w1,...w2,...w3].filter(r=>r.status>=200&&r.status<300).length;
+    const titleColor=critical>0?"var(--red)":okHits>5?"var(--green)":"var(--orange)";
+    h+=`<div class="hs"><div class="hs-t" style="color:${titleColor};font-size:13px">🔁 Smart Recursive Probing — ${total} endpoints probed across 3 waves</div>`;
+    h+=`<div style="padding:4px 16px;font-size:10px;color:var(--t2)">Seed: ${rp.seedCount||0} URLs · Wave1: ${w1.length} · Wave2: ${w2.length} (from wave1 responses) · Wave3: ${w3.length} (from wave2 responses) · ${rp.newUrlsFound||0} new URLs discovered · ${totalFindings} findings${critical?` · <span style="color:var(--red);font-weight:700">${critical} CRITICAL</span>`:""}</div>`;
+    // Render each wave
+    const renderWave=(label,waveData,color)=>{
+      if(!waveData.length)return "";
+      let wh=`<div style="padding:6px 16px;font-size:10px;font-weight:700;color:${color};border-top:1px solid var(--glassbrd);background:${color}08">${label} (${waveData.length} hits)</div>`;
+      waveData.sort((a,b)=>(b.findings?.length||0)-(a.findings?.length||0));
+      waveData.slice(0,50).forEach(r=>{
+        const sColor=r.status>=200&&r.status<300?"var(--green)":r.status===401||r.status===403?"var(--yellow)":r.status>=500?"var(--red)":"var(--t3)";
+        const findingCount=(r.findings||[]).length;
+        const newUrlCount=(r.newUrls||[]).length;
+        const isGql=r.isGraphQL;
+        wh+=`<div style="padding:5px 16px;border-bottom:1px solid var(--glassbrd)">`;
+        wh+=`<div style="display:flex;align-items:center;gap:6px">`;
+        wh+=`<span style="color:${sColor};font-weight:700;font-size:10px;min-width:30px">${r.status}</span>`;
+        if(isGql)wh+=`<span style="font-size:8px;padding:1px 5px;border-radius:3px;background:rgba(155,90,255,.15);color:var(--purple);font-weight:700">GQL</span>`;
+        wh+=`<span style="font-family:var(--mono);font-size:10px;color:var(--t1);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" data-copy="${escA(r.path||r.url||"")}">${esc(r.path||r.url||"")}</span>`;
+        wh+=`<span style="font-size:9px;color:var(--t3)">${fmtSize(r.size)}</span>`;
+        if(findingCount)wh+=`<span style="font-size:8px;padding:1px 5px;border-radius:3px;background:rgba(255,58,92,.15);color:var(--red);font-weight:700">${findingCount} finding${findingCount>1?"s":""}</span>`;
+        if(newUrlCount)wh+=`<span style="font-size:8px;padding:1px 5px;border-radius:3px;background:rgba(58,168,255,.15);color:var(--blue);font-weight:700">+${newUrlCount}</span>`;
+        wh+=`</div>`;
+        // Findings inline
+        if(findingCount){
+          r.findings.slice(0,5).forEach(f=>{
+            const fColor=f.severity==="critical"?"var(--red)":f.severity==="high"?"var(--orange)":f.severity==="medium"?"var(--yellow)":"var(--t3)";
+            wh+=`<div style="padding:2px 0 2px 36px;font-family:var(--mono);font-size:9px"><span style="color:${fColor};font-weight:700">[${esc((f.severity||"").toUpperCase())}]</span> <span style="color:var(--t2)">${esc(f.type)}</span>: <span style="color:var(--yellow);cursor:pointer" data-copy="${escA(f.value)}">${esc(String(f.value).substring(0,120))}</span></div>`;
+          });
+          if(findingCount>5)wh+=`<div style="padding:1px 0 1px 36px;font-size:9px;color:var(--t3)">+${findingCount-5} more findings</div>`;
+        }
+        // Body preview (collapsed)
+        if(r.bodyPreview&&r.bodyPreview.length>20){
+          wh+=`<div style="padding:2px 0 0 36px;font-size:9px;color:var(--t3);cursor:pointer" data-toggle="next">▸ body preview (${r.size}B)</div>`;
+          wh+=`<div style="display:none;padding:4px 0 0 36px"><div style="font-family:var(--mono);font-size:9px;color:var(--t3);background:var(--glass);padding:4px 8px;border-radius:6px;border:1px solid var(--glassbrd);max-height:150px;overflow:auto;white-space:pre-wrap;word-break:break-all;cursor:pointer" data-copytext="1">${esc(r.bodyPreview)}</div></div>`;
+        }
+        // Extracted URLs (collapsed)
+        if(newUrlCount){
+          wh+=`<div style="padding:2px 0 0 36px;font-size:9px;color:var(--blue);cursor:pointer" data-toggle="next">▸ ${newUrlCount} URLs extracted from response</div>`;
+          wh+=`<div style="display:none;padding:4px 0 0 36px">`;
+          r.newUrls.slice(0,30).forEach(u=>{
+            wh+=`<div style="font-family:var(--mono);font-size:9px;color:var(--blue);padding:1px 0;cursor:pointer" data-copy="${escA(u)}">${esc(u)}</div>`;
+          });
+          if(newUrlCount>30)wh+=`<div style="font-size:9px;color:var(--t3);padding:1px 0">...+${newUrlCount-30} more</div>`;
+          wh+=`</div>`;
+        }
+        wh+=`</div>`;
+      });
+      if(waveData.length>50)wh+=`<div style="padding:4px 16px;font-size:10px;color:var(--t3)">Showing 50 of ${waveData.length}</div>`;
+      return wh;
+    };
+    h+=renderWave("Wave 1 — seed URLs from prior steps",w1,"var(--blue)");
+    h+=renderWave("Wave 2 — URLs extracted from Wave 1 responses",w2,"var(--orange)");
+    h+=renderWave("Wave 3 — URLs extracted from Wave 2 responses",w3,"var(--red)");
+    h+=`</div>`;
+  }
+
   // Errors
   if(ar.errors?.length){
     h+=`<div class="hs"><div class="hs-t" style="color:var(--t3)">Probe Log (${ar.errors.length})</div>`;
@@ -1484,6 +1732,19 @@ c.querySelectorAll("[data-viewsrc]").forEach(el=>{el.addEventListener("click",fu
 c.querySelectorAll("[id^='srcview-close-']").forEach(btn=>{btn.addEventListener("click",function(){
   const viewer=btn.closest("[id^='srcview-']");if(viewer)viewer.style.display="none";
 });});
+// v5.8: Restore collapsed section state after re-render + re-apply active filter
+c.querySelectorAll(".hs").forEach(hs=>{
+  const title=hs.querySelector(".hs-t")?.textContent||"";
+  if(title&&_collapsedSections.has(title))hs.classList.add("collapsed");
+});
+const fVal=document.getElementById("fD")?.value||"";
+if(fVal){
+  const fLower=fVal.toLowerCase();
+  c.querySelectorAll(".hs").forEach(hs=>{
+    const text=(hs.textContent||"").toLowerCase();
+    hs.style.display=text.indexOf(fLower)>-1?"":"none";
+  });
+}
 }catch(err){c.innerHTML=`<div class="empty"><div class="empty-i">⚠️</div><div class="empty-t">Deep tab render error: ${esc(err.message)}</div></div>`;console.error("renderDeep error:",err);}}
 
 function renderConsole(filter){
@@ -1541,7 +1802,7 @@ function updateFooter(){if(D?.startTime){const s=Math.floor((Date.now()-D.startT
 // opts.format: "claude" (clipboard, concise) or "markdown" (download, verbose)
 // -------------------------------------------------------
 function buildReport(opts){const v=opts.format==="markdown";const tgtUrl=document.getElementById("tgtUrl").textContent||D.url||"?";const hasDeepData=(D.responseBodies?.length||0)+(D.consoleLogs?.length||0)+(D.auditIssues?.length||0)+(D.scriptSources?.length||0)+(D.executionContexts?.length||0)+(D.discoveredRoutes?.length||0)>0;
-let r=`# PenScope v5.3 Recon Report\n**Target:** ${tgtUrl}\n**Time:** ${new Date().toISOString()}\n**Deep:** ${hasDeepData?"ON (data captured)":D.deepEnabled?"ON":"OFF"}\n`;
+let r=`# PenScope v5.8 Recon Report\n**Target:** ${tgtUrl}\n**Time:** ${new Date().toISOString()}\n**Deep:** ${hasDeepData?"ON (data captured)":D.deepEnabled?"ON":"OFF"}\n`;
 if(v)r+=`**Endpoints:** ${D.endpoints?.length||0} | **Secrets:** ${D.secrets?.length||0} | **Script Findings:** ${D.scriptSources?.length||0} | **Discovered Routes:** ${D.discoveredRoutes?.length||0} | **Audit Issues:** ${D.auditIssues?.length||0}\n\n---\n\n`;
 else r+=`**Discovered Routes:** ${D.discoveredRoutes?.length||0} (endpoints found in code but never called)\n\nAnalyze all findings. Prioritize: XSS sinks, IDOR path params, missing auth, error disclosures, JSONP, mixed content. For discovered routes — identify admin panels, auth endpoints, and destructive actions to test.\n\n---\n\n`;
 if(D.techStack?.length){r+=`## Tech Stack\n`;D.techStack.forEach(t=>r+=`- **${t.name}** (${t.source})\n`);r+=`\n`;}
@@ -1867,6 +2128,40 @@ if(arP&&arP.status==="done"){
   if(arP.timingOracle?.length){const st=arP.timingOracle.filter(t=>t.maxDelta>200);r+=`### ⏱️ Timing Oracle (${st.length} significant / ${arP.timingOracle.length} tested)\n`;arP.timingOracle.forEach(t=>{r+=`- [${t.severity.toUpperCase()}] \`${t.path}\` — baseline: ${t.baselineMs}ms, max delta: ${t.maxDelta}ms\n`;(t.lfiTimings||[]).forEach(lt=>{r+=`  payload: \`${lt.payload}\` → ${lt.time}ms\n`;});});r+=`\n`;}
   if(arP.coopCoepBypass?.length){r+=`### 🛡️ COOP/COEP Bypass\n`;arP.coopCoepBypass.forEach(c=>{r+=`- [${c.severity.toUpperCase()}] ${c.type||"check"}${c.path?" `"+c.path+"`":""}${c.frameable?" **FRAMEABLE**":""}${c.crossOriginIsolated===false?" NOT ISOLATED":""}${c.note?" — "+c.note:""}\n`;});r+=`\n`;}
   if(arP.storagePartition?.length){const sp=arP.storagePartition.filter(s=>s.partitioned);r+=`### 🔒 Storage Partitioning (${sp.length} partitioned)\n`;arP.storagePartition.forEach(s=>{if(s.type!=="summary")r+=`- **${s.type}**: ${s.partitioned?"PARTITIONED":"accessible"}${s.error?" ("+s.error+")":""}\n`;else r+=`- ${s.note}\n`;});r+=`\n`;}
+  // v5.7: Recursive API Discovery — wave-by-wave breakdown with inline findings
+  if(arP.recursiveProbe&&(arP.recursiveProbe.wave1?.length||arP.recursiveProbe.wave2?.length||arP.recursiveProbe.wave3?.length)){
+    const rp=arP.recursiveProbe;
+    const w1=rp.wave1||[],w2=rp.wave2||[],w3=rp.wave3||[];
+    const total=w1.length+w2.length+w3.length;
+    const allFindings=[...w1,...w2,...w3].flatMap(r2=>(r2.findings||[]).map(f=>({...f,sourceUrl:r2.path})));
+    const critical=allFindings.filter(f=>f.severity==="critical").length;
+    const high=allFindings.filter(f=>f.severity==="high").length;
+    r+=`### 🔁 Smart Recursive Probing (${total} endpoints probed, ${allFindings.length} findings)\n`;
+    r+=`Seed: ${rp.seedCount||0} URLs · Wave1: ${w1.length} · Wave2: ${w2.length} · Wave3: ${w3.length} · ${rp.newUrlsFound||0} new URLs discovered${critical?` · **${critical} CRITICAL**`:""}${high?` · ${high} HIGH`:""}\n\n`;
+    const renderWave=(label,waveData)=>{
+      if(!waveData.length)return "";
+      let wr=`**${label} (${waveData.length})**\n`;
+      const sorted=[...waveData].sort((a,b)=>(b.findings?.length||0)-(a.findings?.length||0));
+      sorted.slice(0,v?Infinity:30).forEach(r2=>{
+        wr+=`- **${r2.status}** \`${r2.path||r2.url||""}\``;
+        if(r2.size)wr+=` (${r2.size>1024?Math.round(r2.size/1024)+"KB":r2.size+"B"})`;
+        if(r2.isGraphQL)wr+=` [GraphQL]`;
+        if(r2.findings?.length)wr+=` — **${r2.findings.length} findings**`;
+        if(r2.newUrls?.length)wr+=` — ${r2.newUrls.length} new URLs extracted`;
+        wr+=`\n`;
+        if(r2.findings?.length){
+          r2.findings.slice(0,v?Infinity:5).forEach(f=>{
+            wr+=`  - [${(f.severity||"").toUpperCase()}] ${f.type}: \`${String(f.value).substring(0,150)}\`\n`;
+          });
+        }
+      });
+      wr+=`\n`;
+      return wr;
+    };
+    r+=renderWave("Wave 1 — seed URLs from prior steps",w1);
+    r+=renderWave("Wave 2 — URLs extracted from Wave 1 responses",w2);
+    r+=renderWave("Wave 3 — URLs extracted from Wave 2 responses",w3);
+  }
 }
 // v5.4: New attack surface
 if(D.grpcEndpoints?.length){r+=`## 🔌 gRPC Endpoints (${D.grpcEndpoints.length})\n`;D.grpcEndpoints.forEach(g=>{r+=`- [${g.type}] \`${g.path}\` — ${g.host}${g.contentType?" ("+g.contentType+")":""}\n`;});r+=`\n`;}
@@ -1923,6 +2218,54 @@ if(D.parsedSourceMaps?.length){
     if(sm.sensitiveFiles?.length){r+=`### Sensitive Paths (${sm.sensitiveFiles.length})\n`;sm.sensitiveFiles.forEach(f=>{r+=`- \`${f}\`\n`;});r+=`\n`;}
   });
 }
+// v5.6: GraphQL operations (passive — reconstructed from captured POST bodies)
+if(D.graphqlOps?.length){
+  const queries=D.graphqlOps.filter(o=>o.type==="query");
+  const mutations=D.graphqlOps.filter(o=>o.type==="mutation");
+  const subs=D.graphqlOps.filter(o=>o.type==="subscription");
+  r+=`## 🧬 GraphQL Operations (${D.graphqlOps.length} — ${queries.length}Q / ${mutations.length}M / ${subs.length}S) [PASSIVE]\n`;
+  r+=`Reconstructed from captured POST bodies. Mutations are highest priority for auth/CSRF/IDOR testing.\n\n`;
+  if(mutations.length){
+    r+=`### Mutations (${mutations.length})\n`;
+    mutations.slice(0,v?Infinity:30).forEach(op=>{
+      r+=`- **${op.name}**`;
+      if(op.variables?.length)r+=` — vars: \`${op.variables.join(", ")}\``;
+      if(op.fields?.length)r+=` — fields: \`${op.fields.slice(0,10).join(", ")}\``;
+      if(op.path)r+=` — ${op.path}`;
+      r+=`\n`;
+    });
+    r+=`\n`;
+  }
+  if(queries.length){
+    r+=`### Queries (${queries.length})\n`;
+    queries.slice(0,v?Infinity:30).forEach(op=>{
+      r+=`- **${op.name}**`;
+      if(op.variables?.length)r+=` — vars: \`${op.variables.join(", ")}\``;
+      if(op.fields?.length)r+=` — fields: \`${op.fields.slice(0,10).join(", ")}\``;
+      r+=`\n`;
+    });
+    r+=`\n`;
+  }
+  if(subs.length){
+    r+=`### Subscriptions (${subs.length})\n`;
+    subs.forEach(op=>r+=`- **${op.name}**${op.fields?.length?` — \`${op.fields.slice(0,10).join(", ")}\``:""}\n`);
+    r+=`\n`;
+  }
+}
+// v5.6: Symbol table (pre-minification identifiers)
+if(D.symbolTable?.length&&D.symbolTable[0]?.total){
+  const st=D.symbolTable[0];
+  r+=`## 🔤 Symbol Table (${st.total} identifiers, ${st.interestingCount} interesting)\n`;
+  r+=`Pre-minification identifiers extracted from source-map \`names\` arrays.\n\n`;
+  if(st.interesting?.length){
+    r+=`### Interesting (${st.interesting.length})\n\`\`\`\n`;
+    st.interesting.slice(0,v?Infinity:100).forEach(n=>{r+=`${n}\n`;});
+    r+=`\`\`\`\n\n`;
+  }
+  if(v&&st.sample?.length){
+    r+=`### Full sample (${st.sample.length})\n\`\`\`\n${st.sample.join(", ")}\n\`\`\`\n\n`;
+  }
+}
 return r;}
 
 // -------------------------------------------------------
@@ -1976,7 +2319,179 @@ case"burp":{let t="";D.endpoints?.forEach(e=>t+=e.url+"\n");
       csvIndex:"URL,Source,Files,Endpoints,Secrets,Routes,EnvVars,Deps\n"+maps.map(m=>`"${(m.url||"").substring(0,200)}","${m.source||""}",${m.fileCount||0},${(m.endpoints||[]).length},${(m.secrets||[]).length},${(m.routes||[]).length},${(m.envVars||[]).length},${(m.dependencies||[]).length}`).join("\n")
     };
     download(`penscope_${host}_sourcemaps.json`,JSON.stringify(exportData,null,2),"application/json");break;}
+  case"nuclei":{generateNucleiTemplates(host);break;}
+  case"har-import":{openHarImportDialog();break;}
 }}
+
+// v5.8: HAR import — load a Burp/ZAP/Chrome DevTools HAR capture and replay it into state so
+// PenScope can analyze traffic that was captured elsewhere. Fills endpoints, params, auth headers,
+// POST bodies, and response bodies just as if the user had loaded the page in the current tab.
+function openHarImportDialog(){
+  const input=document.createElement("input");
+  input.type="file";
+  input.accept=".har,application/json";
+  input.onchange=(e)=>{
+    const file=e.target.files&&e.target.files[0];
+    if(!file){toast("No file selected");return;}
+    if(file.size>50*1024*1024){toast("HAR too large (>50MB)");return;}
+    const reader=new FileReader();
+    reader.onload=(evt)=>{
+      try{
+        const har=JSON.parse(evt.target.result);
+        const entries=har?.log?.entries||[];
+        if(!entries.length){toast("HAR has no entries");return;}
+        chrome.runtime.sendMessage({action:"importHar",tabId,entries:entries.slice(0,5000)},r=>{
+          if(r?.ok){
+            toast(`Imported ${r.imported} entries · ${r.endpoints} endpoints, ${r.params} params`);
+            setTimeout(load,500);
+          }else{
+            toast("Import failed: "+(r?.error||"unknown"));
+          }
+        });
+      }catch(err){toast("HAR parse error: "+err.message);}
+    };
+    reader.onerror=()=>toast("Failed to read file");
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
+// v5.8: Nuclei template export — weaponize PenScope findings as YAML templates for continuous
+// scanning with ProjectDiscovery's nuclei. Generates one template per class of finding with
+// matchers derived from actual observed responses. Output is a multi-document YAML file so it
+// can be dropped directly into ~/.config/nuclei/custom/ and scanned with `nuclei -t ./custom/`.
+function generateNucleiTemplates(host){
+  const tgtUrl=document.getElementById("tgtUrl").textContent||D.url||"";
+  let baseUrl="https://"+host;
+  try{const u=new URL(tgtUrl);baseUrl=u.origin;}catch(e){}
+  const ye=s=>(s||"").toString().replace(/'/g,"''").replace(/[\r\n]/g," ");
+  const slug=s=>(s||"").toString().replace(/[^a-z0-9]/gi,"-").replace(/-+/g,"-").replace(/^-|-$/g,"").substring(0,50).toLowerCase()||"finding";
+  const docs=[];
+  function docHeader(id,name,severity,desc,tags){
+    return "id: "+id+"\n"+
+      "info:\n"+
+      "  name: '"+ye(name)+"'\n"+
+      "  author: penscope\n"+
+      "  severity: "+severity+"\n"+
+      "  description: '"+ye(desc||name)+"'\n"+
+      "  tags: "+tags+"\n"+
+      "  reference:\n"+
+      "    - https://penscope.local/v"+"5.8\n";
+  }
+  // 1. Broken Access Control hits from the probe
+  const bac=(D.probeData?.bacResults||[]).filter(b=>b.vulnerable);
+  bac.forEach((b,i)=>{
+    docs.push(docHeader("penscope-bac-"+slug(b.path)+"-"+i,"Broken Access Control: "+b.path,"high","Endpoint accepts "+b.method+" without role enforcement (detected by PenScope)","access-control,bac,penscope")+
+      "\nhttp:\n"+
+      "  - method: "+b.method+"\n"+
+      "    path:\n"+
+      "      - '{{BaseURL}}"+ye(b.path)+"'\n"+
+      (["POST","PUT","PATCH"].indexOf(b.method)>-1?"    headers:\n      Content-Type: application/json\n    body: '{}'\n":"")+
+      "    matchers-condition: and\n"+
+      "    matchers:\n"+
+      "      - type: status\n        status:\n          - 200\n          - 201\n          - 204\n"+
+      "      - type: word\n        part: body\n        negative: true\n        words:\n          - 'unauthorized'\n          - 'forbidden'\n          - 'login required'\n");
+  });
+  // 2. Auth Removal — endpoints that return 200 without credentials
+  const ar=(D.probeData?.authRemovalResults||[]).filter(r=>r.severity==="critical"||r.severity==="high");
+  ar.forEach((r,i)=>{
+    docs.push(docHeader("penscope-auth-removal-"+slug(r.path)+"-"+i,"Missing auth enforcement: "+r.path,r.severity,"Endpoint returns same data without any authentication (detected by PenScope)","auth,broken-auth,penscope")+
+      "\nhttp:\n"+
+      "  - method: "+r.method+"\n"+
+      "    path:\n"+
+      "      - '{{BaseURL}}"+ye(r.path)+"'\n"+
+      "    matchers-condition: and\n"+
+      "    matchers:\n"+
+      "      - type: status\n        status:\n          - 200\n"+
+      "      - type: dsl\n        dsl:\n          - 'len(body) > 50'\n");
+  });
+  // 3. IDOR — auto-test hits that returned critical/high
+  const idor=(D.probeData?.idorAutoResults||[]).filter(r=>r.severity==="critical"||r.severity==="high");
+  idor.forEach((r,i)=>{
+    if(!r.path||r.path.indexOf("GraphQL")>-1)return;
+    docs.push(docHeader("penscope-idor-"+slug(r.path)+"-"+i,"IDOR on "+r.path,r.severity,"Path parameter "+r.originalId+" can be substituted with "+r.testedId+" (detected by PenScope)","idor,access-control,penscope")+
+      "\nhttp:\n"+
+      "  - method: GET\n"+
+      "    path:\n"+
+      "      - '{{BaseURL}}"+ye(String(r.path).replace(r.originalId,r.testedId))+"'\n"+
+      "    matchers:\n"+
+      "      - type: status\n        status:\n          - 200\n");
+  });
+  // 4. CORS misconfiguration — reflected origins
+  const cors=(D.probeData?.corsResults||[]).filter(c=>c.severity==="critical"||c.severity==="high");
+  cors.forEach((c,i)=>{
+    docs.push(docHeader("penscope-cors-"+slug(c.path)+"-"+i,"CORS reflection on "+c.path,c.severity,"Origin "+c.origin+" reflected in ACAO"+(c.acac==="true"?" with credentials":"")+" (detected by PenScope)","cors,penscope")+
+      "\nhttp:\n"+
+      "  - method: GET\n"+
+      "    path:\n"+
+      "      - '{{BaseURL}}"+ye(c.path)+"'\n"+
+      "    headers:\n"+
+      "      Origin: '"+ye(c.origin)+"'\n"+
+      "    matchers:\n"+
+      "      - type: word\n        part: header\n        words:\n          - 'Access-Control-Allow-Origin: "+ye(c.origin)+"'\n");
+  });
+  // 5. Open redirects
+  const redir=(D.probeData?.openRedirects||[]);
+  redir.forEach((r,i)=>{
+    docs.push(docHeader("penscope-open-redirect-"+slug(r.path)+"-"+i,"Open Redirect on "+r.path,r.severity||"high","Parameter "+r.param+" accepts attacker-controlled redirect target (detected by PenScope)","redirect,open-redirect,penscope")+
+      "\nhttp:\n"+
+      "  - method: GET\n"+
+      "    path:\n"+
+      "      - '{{BaseURL}}"+ye(r.path)+"?"+ye(r.param)+"=https://evil.com'\n"+
+      "    matchers:\n"+
+      "      - type: regex\n        part: header\n        regex:\n          - 'Location: https?://evil\\.com'\n");
+  });
+  // 6. Missing CSRF on state-changing endpoints
+  const csrf=(D.probeData?.csrfResults||[]).filter(r=>r.severity==="critical"||r.severity==="high");
+  csrf.forEach((r,i)=>{
+    docs.push(docHeader("penscope-csrf-"+slug(r.path)+"-"+i,"Missing CSRF on "+r.path,r.severity,r.note||"State-changing endpoint lacks CSRF token validation","csrf,penscope")+
+      "\nhttp:\n"+
+      "  - method: "+r.method+"\n"+
+      "    path:\n"+
+      "      - '{{BaseURL}}"+ye(r.path)+"'\n"+
+      "    headers:\n"+
+      "      Content-Type: application/json\n"+
+      "    body: '{}'\n"+
+      "    matchers:\n"+
+      "      - type: status\n        status:\n          - 200\n          - 201\n          - 204\n");
+  });
+  // 7. HTTP method tampering
+  const mt=(D.probeData?.methodResults||[]).filter(m=>m.interesting);
+  mt.forEach((m,i)=>{
+    docs.push(docHeader("penscope-method-override-"+slug(m.path)+"-"+i,"Method tampering on "+m.path,"medium","Endpoint accepts "+m.testedMethod+" when "+m.originalMethod+" was observed","method-override,penscope")+
+      "\nhttp:\n"+
+      "  - method: "+m.testedMethod+"\n"+
+      "    path:\n"+
+      "      - '{{BaseURL}}"+ye(m.path)+"'\n"+
+      "    matchers:\n"+
+      "      - type: status\n        status:\n          - 200\n          - 201\n          - 204\n");
+  });
+  // 8. Exposed secrets from recursive probe findings — turned into simple word-match templates
+  const secrets=(D.secrets||[]).filter(s=>(s.severity==="critical"||s.severity==="high")&&s.source&&s.source.indexOf("recursive:")===0);
+  secrets.slice(0,30).forEach((s,i)=>{
+    const path=s.source.substring(10);
+    if(!path||path.charAt(0)!=="/")return;
+    docs.push(docHeader("penscope-secret-"+slug(s.type)+"-"+i,"Secret exposure ("+s.type+") on "+path,s.severity,"Response body contains a "+s.type+" matching PenScope pattern","secret-exposure,sensitive-data,penscope")+
+      "\nhttp:\n"+
+      "  - method: GET\n"+
+      "    path:\n"+
+      "      - '{{BaseURL}}"+ye(path)+"'\n"+
+      "    matchers:\n"+
+      "      - type: word\n        part: body\n        words:\n          - '"+ye(s.type.toLowerCase().split(" ")[0])+"'\n");
+  });
+  if(!docs.length){
+    toast("No actionable findings to export as Nuclei templates");
+    return;
+  }
+  // Multi-document YAML: separate with ---
+  const yaml="# PenScope v5.8 — Nuclei templates auto-generated from scan of "+host+"\n"+
+    "# Generated: "+new Date().toISOString()+"\n"+
+    "# Total templates: "+docs.length+"\n"+
+    "# Usage: nuclei -u "+baseUrl+" -t ./penscope_"+host+"_nuclei.yaml\n\n"+
+    docs.join("\n---\n\n");
+  download("penscope_"+host+"_nuclei.yaml",yaml,"text/yaml");
+  toast("Generated "+docs.length+" Nuclei templates");
+}
 function download(n,c,t){const b=new Blob([c],{type:t}),u=URL.createObjectURL(b),a=document.createElement("a");a.href=u;a.download=n;a.style.display="none";document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(u);document.body.removeChild(a);},500);}
 function generateSwaggerSpec(host){
   const tgtUrl=document.getElementById("tgtUrl").textContent||D.url||"";
@@ -2121,10 +2636,10 @@ function generateSwaggerSpec(host){
   let yaml="openapi: '3.0.3'\n";
   yaml+="info:\n";
   yaml+=`  title: '${yesc(host)} — PenScope Reconstructed API'\n`;
-  yaml+=`  description: '${yesc("Auto-generated from "+allRoutes.size+" discovered endpoints by PenScope v5.3. NOT an official spec — reconstructed from client-side JavaScript analysis.")}'\n`;
+  yaml+=`  description: '${yesc("Auto-generated from "+allRoutes.size+" discovered endpoints by PenScope v5.8. NOT an official spec — reconstructed from client-side JavaScript analysis.")}'\n`;
   yaml+="  version: 'penscope-recon'\n";
   yaml+=`  x-generated-at: '${yesc(new Date().toISOString())}'\n`;
-  yaml+=`  x-generated-by: 'PenScope v5.3'\n`;
+  yaml+=`  x-generated-by: 'PenScope v5.8'\n`;
   yaml+=`  x-total-routes: ${allRoutes.size}\n`;
   yaml+="servers:\n";
   yaml+=`  - url: '${yesc(baseUrl)}'\n`;

@@ -1,9 +1,12 @@
-// PenScope v5.5 — Background Service Worker
+// PenScope v5.8 — Background Service Worker
 // v5.1: Full Endpoint Discovery + Probe Engine (22 steps)
 // v5.2: IndexedDB + CacheStorage + JWT + Route classification + Permission matrix + IDOR
 // v5.3: POST body + API response scan + Coverage + Event listeners + Shadow DOM + Memory mining
 // v5.4: gRPC + WebAssembly + WebRTC leaks + BroadcastChannel + WebAuthn + Compression oracle
 // v5.5: WASM hex dump + crypto detect + WebGPU + WS hijack + Cache poison + Timing oracle + COOP/COEP + Storage partition (29 steps)
+// v5.6: Base64-encoded response body decoding + SPA coverage restart + memory-string substring scan + GraphQL op extractor + source-map symbol table
+// v5.7: Custom headers + smart recursive API discovery (3 waves) + in-probe findings scanner + GraphQL query field auto-probing (30 steps)
+// v5.8: Stealth mode (jitter/random pauses) + session persistence + HAR import + Nuclei export + severity confidence weighting + Deep tab filter/collapse
 
 const CONFIG = {
   MAX_SCRIPTS: 80,
@@ -26,6 +29,64 @@ const CONFIG = {
 
 const state={};const _seen={};const _debugTabs=new Set();const _pending={};const _scripts={};
 setInterval(()=>{const now=Date.now();for(const k of Object.keys(_pending)){if(_pending[k]._ts&&now-_pending[k]._ts>CONFIG.PENDING_TTL)delete _pending[k];}},CONFIG.PENDING_CLEANUP_INTERVAL);
+
+// v5.8: State persistence via chrome.storage.session — survives service worker restarts so a
+// 5-minute idle doesn't wipe findings. Session storage clears on browser close, which is the
+// right lifetime for a recon tool. Save is debounced + trimmed; restore rehydrates endpointIndex.
+const _dirtyTabs=new Set();
+let _saveTimer=null;
+function markDirty(tabId){
+  _dirtyTabs.add(tabId);
+  if(_saveTimer)return;
+  _saveTimer=setTimeout(flushDirty,5000);
+}
+async function flushDirty(){
+  _saveTimer=null;
+  const tabs=[..._dirtyTabs];
+  _dirtyTabs.clear();
+  for(const tabId of tabs){
+    if(!state[tabId])continue;
+    try{
+      const snap=serializeTabState(state[tabId]);
+      await chrome.storage.session.set({[`ps:tab:${tabId}`]:snap});
+    }catch(e){console.warn('[PenScope] persist',e.message||e);}
+  }
+}
+function serializeTabState(d){
+  // Strip non-serializable + trim large arrays to stay under the session storage quota
+  const snap={};
+  for(const k in d){
+    if(k==="endpointIndex")continue;
+    if(k==="_loadTimers")continue;
+    if(typeof d[k]==="function")continue;
+    snap[k]=d[k];
+  }
+  if(snap.endpoints&&snap.endpoints.length>500)snap.endpoints=snap.endpoints.slice(-500);
+  if(snap.apiResponseBodies&&snap.apiResponseBodies.length>60)snap.apiResponseBodies=snap.apiResponseBodies.slice(-60);
+  if(snap.postBodies&&snap.postBodies.length>100)snap.postBodies=snap.postBodies.slice(-100);
+  if(snap.discoveredRoutes&&snap.discoveredRoutes.length>800)snap.discoveredRoutes=snap.discoveredRoutes.slice(-800);
+  if(snap.scriptSources&&snap.scriptSources.length>300)snap.scriptSources=snap.scriptSources.slice(-300);
+  if(snap.consoleLogs&&snap.consoleLogs.length>150)snap.consoleLogs=snap.consoleLogs.slice(-150);
+  if(snap.perfEntries&&snap.perfEntries.length>200)snap.perfEntries=snap.perfEntries.slice(-200);
+  if(snap.headerIntel&&snap.headerIntel.length>150)snap.headerIntel=snap.headerIntel.slice(-150);
+  return snap;
+}
+async function restoreStateOnStartup(){
+  try{
+    const all=await chrome.storage.session.get(null);
+    Object.keys(all).forEach(k=>{
+      if(!k.startsWith("ps:tab:"))return;
+      const tabId=parseInt(k.substring(7));
+      if(isNaN(tabId)||state[tabId])return;
+      const snap=all[k];
+      if(!snap||typeof snap!=="object")return;
+      state[tabId]=snap;
+      state[tabId].endpointIndex=new Map();
+      (snap.endpoints||[]).forEach(e=>{if(e.url)state[tabId].endpointIndex.set(e.url,e);});
+    });
+  }catch(e){console.warn('[PenScope] restore',e.message||e);}
+}
+restoreStateOnStartup();
 function T(tabId){if(!state[tabId]){state[tabId]={url:"",endpoints:[],headers:[],secrets:[],hiddenFields:[],sourceMaps:[],forms:[],techStack:[],jsGlobals:[],storageData:{local:{},session:{}},cookies:[],wsConnections:[],wsMessages:[],params:{},authFlows:[],subdomains:[],thirdParty:[],links:[],inlineHandlers:[],metaTags:[],serviceWorkers:[],cspViolations:[],deepEnabled:false,requestHeaders:[],responseBodies:[],certInfo:null,errorBodies:[],redirectChains:[],apiVersions:[],swaggerEndpoints:[],endpointMeta:{},endpointIndex:new Map(),
 // v4+ fields
 mixedContent:[],sriIssues:[],postMessageListeners:[],dependencyVersions:[],webWorkers:[],domXSSSinks:[],jsonpEndpoints:[],cookieFindings:[],reconSuggestions:[],pathParams:[],methodSuggestions:[],
@@ -84,6 +145,9 @@ timingOracle:[],
 coopCoepInfo:null,
 storagePartition:[],
 webgpuInfo:null,
+// v5.6 — new fields
+graphqlOps:[],        // Parsed GraphQL operations from captured POST bodies (passive schema reconstruction)
+symbolTable:[],       // Aggregated pre-minification identifiers from source-map `names` arrays
 startTime:Date.now()};}return state[tabId];}
 function seen(tabId,ns,key){const k=`${tabId}:${ns}`;if(!_seen[k])_seen[k]=new Set();if(_seen[k].has(key))return true;_seen[k].add(key);return false;}
 
@@ -299,26 +363,29 @@ chrome.debugger.onEvent.addListener((source,method,params)=>{
       try{const u=new URL(resp.url);const timingKey=u.pathname;if(resp.timing){const totalMs=Math.round((resp.timing.receiveHeadersEnd||0)-(resp.timing.sendStart||0));if(totalMs>0){if(!tab.networkTiming[timingKey])tab.networkTiming[timingKey]=[];tab.networkTiming[timingKey].push({status,size:respSize,time:totalMs,url:resp.url.substring(0,150)});}}}catch(e){console.warn('[PenScope] networkTiming',e.message||e);}
       break;}
     case "Network.loadingFinished":{const key=`${tabId}:${params.requestId}`;const meta=_pending[key];if(!meta)break;delete _pending[key];
-      // v5.3: Increased body limits — JS for route discovery, JSON for API data extraction
       const isJS=(meta.mimeType||"").includes("javascript")||(meta.url||"").endsWith(".js");
       const isJSON=(meta.mimeType||"").includes("json");
       const isAPI=/\/api\//i.test(meta.url||"");
-      const bodyLimit=isJS?500000:isJSON?200000:isAPI?200000:50000;
+      const isWasm=(meta.url||"").split("?")[0].endsWith(".wasm")||(meta.mimeType||"").includes("wasm");
+      const bodyLimit=isJS?500000:isJSON?200000:isAPI?200000:isWasm?2000000:50000;
       chrome.debugger.sendCommand({tabId},"Network.getResponseBody",{requestId:params.requestId},(result)=>{
         if(chrome.runtime.lastError||!result||!result.body)return;
+        // CDP returns non-UTF-8 bodies (WASM, images, fonts, protobufs) as base64. Decode WASM for binary
+        // analysis; skip pattern scanning on other binary since atob() output corrupts text regexes.
+        const isB64=result.base64Encoded===true;
+        if(isB64){
+          if(isWasm){try{processWasmBinary(tabId,meta.url,result.body,meta.status,meta.mimeType);}catch(e){console.warn('[PenScope] wasm binary',e.message||e);}}
+          return;
+        }
         const body=result.body.substring(0,bodyLimit);
-        // Original: scan for response body patterns (admin flags, tokens, errors, etc.)
         scanResponseBody(tabId,meta,body.substring(0,50000));
-        // v5.3: Store full API response bodies for deep analysis
         if((isJSON||isAPI)&&body.length>10&&!meta.isError){
           try{const u=new URL(meta.url);const rbKey=`arb:${u.pathname}`;
           if(!seen(tabId,"arb",rbKey)&&tab.apiResponseBodies.length<100){
-            // Deep scan the full body for secrets and interesting data
             const findings=deepScanBody(body,meta.url);
             tab.apiResponseBodies.push({url:meta.url,path:u.pathname,status:meta.status,size:body.length,contentType:meta.mimeType,bodyPreview:body.substring(0,500),findings,timestamp:Date.now()});
           }}catch(e){console.warn('[PenScope] apiResponseBody',e.message||e);}
         }
-        // v5.1: If it's a JS file, also grep for endpoints/secrets/routes via Network domain
         if(isJS&&body.length>100){
           const scriptUrl=meta.url||"";
           if(!scriptUrl.includes("google-analytics")&&!scriptUrl.includes("gtag")&&!scriptUrl.includes("translate.googleapis")&&!scriptUrl.includes("gstatic.com")&&!scriptUrl.includes("recaptcha")&&!scriptUrl.includes("googletagmanager")){
@@ -326,7 +393,6 @@ chrome.debugger.onEvent.addListener((source,method,params)=>{
           }
         }
         if(meta.isError&&!seen(tabId,"err",`${meta.status}:${meta.url.substring(0,80)}`))tab.errorBodies.push({url:meta.url,status:meta.status,mimeType:meta.mimeType,body:body.substring(0,3000),size:meta.size,timestamp:Date.now()});
-        // v5.3.2: Auto-capture source maps passively (browser already fetched them)
         if(meta.isSourceMap&&meta.status===200&&body.length>50&&body.indexOf('"sources"')>-1){
           try{if(!seen(tabId,"pmap",meta.url))parseAndStoreSourceMap(tabId,body,meta.url,"passive-network");}catch(e){console.warn('[PenScope] auto sourcemap',e.message||e);}
         }
@@ -340,6 +406,20 @@ chrome.debugger.onEvent.addListener((source,method,params)=>{
         chrome.debugger.sendCommand({tabId},"Profiler.enable",{},()=>{
           if(!chrome.runtime.lastError)chrome.debugger.sendCommand({tabId},"Profiler.startPreciseCoverage",{callCount:true,detailed:false});
         });
+      }else{
+        // SPA route change — profiler already running, take a merging snapshot (throttled to 10s)
+        const now=Date.now();
+        if(!tab._lastCovSnap||now-tab._lastCovSnap>10000){
+          tab._lastCovSnap=now;
+          setTimeout(()=>takeCoverageSnapshot(tabId),2500);
+        }
+      }
+      // Re-extract runtime/routes/storage on SPA navigation so single-page apps
+      // don't show stale data from the first page load (throttled to avoid thrash)
+      const nowR=Date.now();
+      if(!tab._lastRuntimeReextract||nowR-tab._lastRuntimeReextract>8000){
+        tab._lastRuntimeReextract=nowR;
+        setTimeout(()=>{if(_debugTabs.has(tabId))runRuntimeExtraction(tabId);},2000);
       }
       break;}
     case "Page.loadEventFired":case "Page.domContentEventFired":{
@@ -455,7 +535,59 @@ chrome.debugger.onEvent.addListener((source,method,params)=>{
   }
 });
 
-function scanResponseBody(tabId,meta,body){const tab=T(tabId);RESP_PATTERNS.forEach(pat=>{let count=0;for(const match of body.matchAll(pat.regex)){if(count>=3)break;count++;const val=match[1]||match[0];const fKey=`${pat.name}:${val.substring(0,30)}:${meta.url.substring(0,60)}`;if(!seen(tabId,"rb",fKey)){const s=Math.max(0,match.index-30),e=Math.min(body.length,match.index+match[0].length+30);tab.responseBodies.push({pattern:pat.name,severity:pat.sev,description:pat.desc,value:val.substring(0,200),context:body.substring(s,e).replace(/[\n\r]/g," ").substring(0,250),url:meta.url,status:meta.status,mimeType:meta.mimeType});}}});}
+// v5.8: Severity weighting — adjust a finding's severity based on where it was found and what
+// signal it actually carries. The old "every regex match is critical" approach produces too much
+// noise on real targets. Rules (all additive, clamped to [info..critical]):
+//   +1 severity: found in cookie, Authorization header, or response body of an authenticated API
+//   +1 severity: value looks like a live JWT (has three base64 parts + exp claim in the future)
+//   -1 severity: found in a comment, TODO, or localization file
+//   -1 severity: pattern is a stack trace / SQL error but status code is 2xx (unlikely real error)
+//   -1 severity: pattern is "Email" / "Internal ID" and the value matches a known test pattern
+// Returns the adjusted severity string.
+const _SEV_ORDER=["info","low","medium","high","critical"];
+function weighSeverity(baseSev,opts){
+  let score=_SEV_ORDER.indexOf(baseSev);
+  if(score<0)score=0;
+  if(opts){
+    if(opts.inCookie||opts.inAuthHeader||opts.inAuthenticatedApi)score++;
+    if(opts.valueIsLiveJwt)score++;
+    if(opts.inComment||opts.inLocalization)score--;
+    if(opts.successStatus&&opts.patternIsError)score--;
+    if(opts.valueLooksLikeTest)score--;
+  }
+  score=Math.max(0,Math.min(4,score));
+  return _SEV_ORDER[score];
+}
+function looksLikeTestValue(v){
+  if(!v||typeof v!=="string")return false;
+  const low=v.toLowerCase();
+  return /test|example|sample|foo@bar|placeholder|dummy|lorem|asdf|john\.doe|jane\.doe|no-?reply/i.test(low);
+}
+function scanResponseBody(tabId,meta,body){
+  const tab=T(tabId);
+  const isSuccess=meta.status>=200&&meta.status<300;
+  const isAuthPath=/\/api\/|\/v\d+\/|\/graphql|\/auth|\/account|\/me\b/i.test(meta.url||"");
+  RESP_PATTERNS.forEach(pat=>{
+    let count=0;
+    for(const match of body.matchAll(pat.regex)){
+      if(count>=3)break;
+      count++;
+      const val=match[1]||match[0];
+      const fKey=`${pat.name}:${val.substring(0,30)}:${meta.url.substring(0,60)}`;
+      if(seen(tabId,"rb",fKey))continue;
+      const s=Math.max(0,match.index-30),e=Math.min(body.length,match.index+match[0].length+30);
+      const ctx=body.substring(s,e).replace(/[\n\r]/g," ").substring(0,250);
+      const weighted=weighSeverity(pat.sev,{
+        inAuthenticatedApi:isAuthPath,
+        successStatus:isSuccess,
+        patternIsError:/Stack trace|SQL error|MongoDB error/i.test(pat.name),
+        valueLooksLikeTest:looksLikeTestValue(val),
+        inComment:/\/\/|\/\*|#/.test(ctx.substring(0,20))
+      });
+      tab.responseBodies.push({pattern:pat.name,severity:weighted,description:pat.desc,value:val.substring(0,200),context:ctx,url:meta.url,status:meta.status,mimeType:meta.mimeType});
+    }
+  });
+}
 
 // -------------------------------------------------------
 // v5.1: SCAN JS VIA NETWORK DOMAIN
@@ -576,6 +708,19 @@ const SCRIPT_PATTERNS=[
   {name:"Anthropic API Key",regex:/sk-ant-api03-[a-zA-Z0-9_-]{90,}/g,sev:"critical",extract:0},
   {name:"Google AI Key",regex:/AIza[A-Za-z0-9_-]{35}/g,sev:"high",extract:0},
   {name:"HuggingFace Token",regex:/hf_[a-zA-Z0-9]{34,}/g,sev:"high",extract:0},
+  // v5.6: Service Worker introspection — reveals client-side proxy/cache logic + cache-poisoning surface
+  {name:"SW Route Handler",regex:/(?:workbox\.routing\.)?registerRoute\s*\(/g,sev:"info",extract:0},
+  {name:"SW Cache Strategy",regex:/new\s+(CacheFirst|NetworkFirst|StaleWhileRevalidate|NetworkOnly|CacheOnly)\s*\(/g,sev:"info",extract:1},
+  {name:"SW Fetch Intercept",regex:/self\.addEventListener\s*\(\s*["']fetch["']/g,sev:"medium",extract:0},
+  {name:"SW Cache Name",regex:/caches\.(?:open|match|delete)\s*\(\s*["']([^"']{2,100})["']/g,sev:"info",extract:1},
+  {name:"SW Push Handler",regex:/self\.addEventListener\s*\(\s*["']push["']/g,sev:"medium",extract:0},
+  {name:"SW Skip Waiting",regex:/self\.skipWaiting\s*\(\s*\)/g,sev:"info",extract:0},
+  {name:"SW Precache",regex:/(?:workbox\.precaching\.)?precacheAndRoute\s*\(/g,sev:"info",extract:0},
+  // v5.6: Prototype pollution and DOM clobbering sinks
+  {name:"__proto__ Assignment",regex:/\[\s*["']__proto__["']\s*\]\s*=/g,sev:"medium",extract:0},
+  {name:"Object.prototype Assignment",regex:/Object\.(?:assign|defineProperty)\s*\(\s*(?:[a-zA-Z_$][\w$]*\.__proto__|Object\.prototype)/g,sev:"high",extract:0},
+  // v5.6: postMessage wildcard target (common XSS via iframe)
+  {name:"postMessage Wildcard",regex:/\.postMessage\s*\([^,)]{1,300}?,\s*["']\*["']/g,sev:"medium",extract:0},
 ];
 
 // -------------------------------------------------------
@@ -972,9 +1117,9 @@ function collectEphemeralDOM(tabId){
 // Uses session cookies for authenticated probing
 // Requires Deep mode (debugger) to be enabled
 // -------------------------------------------------------
-async function runProbe(tabId,aggroLevel){
+async function runProbe(tabId,aggroLevel,customHeaders,recursive,stealth){
   const tab=T(tabId);
-  tab.probeData={status:"running",startTime:Date.now(),requests:0,graphql:null,sourceMaps:[],swagger:[],probes:[],options:[],suffixes:[],errors:[],aggroLevel,bacResults:[],idorResults:[],corsResults:[],methodResults:[],openRedirects:[],raceResults:[],hppResults:[],subdomains:[],graphqlFuzz:[],jwtAlgResults:[],hostHeaderResults:[],cachePoisonResults:[],idorAutoResults:[],authRemovalResults:[],csrfResults:[],grpcReflection:null,compressionResults:[],wsHijackResults:[],cachePoisonProbe:[],timingOracle:[],coopCoepBypass:[],storagePartition:[]};
+  tab.probeData={status:"running",startTime:Date.now(),requests:0,graphql:null,sourceMaps:[],swagger:[],probes:[],options:[],suffixes:[],errors:[],aggroLevel,bacResults:[],idorResults:[],corsResults:[],methodResults:[],openRedirects:[],raceResults:[],hppResults:[],subdomains:[],graphqlFuzz:[],jwtAlgResults:[],hostHeaderResults:[],cachePoisonResults:[],idorAutoResults:[],authRemovalResults:[],csrfResults:[],grpcReflection:null,compressionResults:[],wsHijackResults:[],cachePoisonProbe:[],timingOracle:[],coopCoepBypass:[],storagePartition:[],recursiveProbe:null,customHeaderCount:Object.keys(customHeaders||{}).length,stealthMode:stealth===true};
 
   // === Gather context from existing PenScope data ===
   const smUrls=[...new Set(tab.sourceMaps.map(s=>{
@@ -1028,7 +1173,13 @@ async function runProbe(tabId,aggroLevel){
     // v5.4: gRPC endpoints for reflection probing
     grpcEndpoints:(tab.grpcEndpoints||[]).map(g=>({url:g.url,path:g.path,type:g.type})).slice(0,30),
     // v5.4: state-changing endpoints for compression testing
-    stateChangingPosts:tab.endpoints.filter(e=>e.method==="POST"&&e.status===200).map(e=>({url:e.url,path:e.path})).slice(0,20)
+    stateChangingPosts:tab.endpoints.filter(e=>e.method==="POST"&&e.status===200).map(e=>({url:e.url,path:e.path})).slice(0,20),
+    // v5.7: custom headers merged into every probe request
+    customHeaders:customHeaders||{},
+    // v5.7: smart recursive API discovery toggle
+    recursive:recursive!==false,
+    // v5.8: stealth mode — jitter + random pauses to evade WAFs
+    stealth:stealth===true
   };
   // === Build the eval script — runs in page context with cookies ===
   // ctx is injected via window.__ps_ctx to avoid ALL template literal escaping issues
@@ -1038,12 +1189,27 @@ try{
 var ctx=window.__ps_ctx||{};
 R.errors.push("ctx loaded: smUrls="+ctx.smUrls.length+" gql="+ctx.gqlPaths.length+" api="+ctx.apiPaths.length+" prefixes="+ctx.prefixes.length+" probes="+ctx.allProbes.length);
 
+function mergeCustomHeaders(baseHeaders){
+  if(!ctx.customHeaders)return baseHeaders||{};
+  var ch=ctx.customHeaders;
+  var hasAny=false;
+  for(var k in ch){if(Object.prototype.hasOwnProperty.call(ch,k)){hasAny=true;break;}}
+  if(!hasAny)return baseHeaders||{};
+  var out={};
+  if(baseHeaders)for(var k1 in baseHeaders){if(Object.prototype.hasOwnProperty.call(baseHeaders,k1))out[k1]=baseHeaders[k1];}
+  for(var k2 in ch){if(Object.prototype.hasOwnProperty.call(ch,k2))out[k2]=ch[k2];}
+  return out;
+}
 async function sf(url,opts,maxBody){
   R.requests++;
   try{
     var c=new AbortController();
     var t=setTimeout(function(){c.abort();},12000);
-    var r=await fetch(url,Object.assign({redirect:"follow",signal:c.signal},opts||{}));
+    var finalOpts=Object.assign({redirect:"follow",signal:c.signal},opts||{});
+    finalOpts.headers=mergeCustomHeaders(finalOpts.headers);
+    // Always include credentials so session cookies + custom Authorization are both sent
+    if(!finalOpts.credentials)finalOpts.credentials="include";
+    var r=await fetch(url,finalOpts);
     clearTimeout(t);
     var body="";
     var isHead=opts&&opts.method&&opts.method.toUpperCase()==="HEAD";
@@ -1059,7 +1225,74 @@ async function sf(url,opts,maxBody){
       server:r.headers.get("server")||""};
   }catch(e){return{url:url,status:0,ok:false,error:e.message,body:"",ct:"",allow:"",location:"",server:""};}
 }
-function delay(ms){return new Promise(function(r){setTimeout(r,ms);});}
+function delay(ms){
+  // v5.8: Stealth mode — add 0-80% jitter to every delay and a larger pause every 10 requests
+  // to break up the probe's cadence. WAFs tend to pattern-match rapid sequential requests, so
+  // even small randomization significantly reduces detection rates.
+  if(ctx.stealth){
+    ms=ms+Math.floor(Math.random()*(ms*0.8));
+    if(R.requests>0&&R.requests%10===0)ms+=200+Math.floor(Math.random()*600);
+  }
+  return new Promise(function(r){setTimeout(r,ms);});
+}
+// v5.7: Helper — extract path-only URLs from a response body (/api/*, /v1/*, /graphql, etc).
+// Returns a deduplicated array capped at 50 URLs per body. Filters out static assets.
+function extractUrlsFromBody(body){
+  if(!body||typeof body!=="string"||body.length<10)return [];
+  var urls={};
+  var count=0;
+  var pathRe=/["'\`](\/(?:api|v\d+|graphql|gql|rest|admin|internal|app|auth|user|account|public)\/[a-zA-Z0-9_\-\/.{}:?=&,%~]+)["'\`]/g;
+  var m;
+  while((m=pathRe.exec(body))!==null&&count<80){
+    var p=m[1];
+    if(p.length<=4||p.length>=250)continue;
+    if(/\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|pdf|mp4|mp3|webp)(?:\?|$)/i.test(p))continue;
+    var hashIdx=p.indexOf("#");
+    if(hashIdx>-1)p=p.substring(0,hashIdx);
+    if(!urls[p]){urls[p]=1;count++;}
+  }
+  return Object.keys(urls).slice(0,50);
+}
+// v5.7: Helper — scan a response body for secrets/PII/internals. Returns an array of findings
+// so the recursive probe can bubble them up to the main Secrets tab. Each finding has
+// {type, severity, value, context}. Capped at 5 per pattern to avoid flooding reports.
+function scanBodyForFindings(body){
+  if(!body||typeof body!=="string"||body.length<10)return [];
+  var findings=[];
+  var patterns=[
+    {n:"Auth Token",re:/"(?:access_token|refresh_token|bearer|jwt|session_token|id_token|auth_token)"\s*:\s*"([^"]{10,})"/gi,sev:"critical"},
+    {n:"API Key",re:/"(?:api_key|apiKey|api_secret|client_secret|secret_key|privateKey|private_key)"\s*:\s*"([^"]{8,})"/gi,sev:"critical"},
+    {n:"Password",re:/"(?:password|passwd|pwd|pass_hash|password_hash)"\s*:\s*"([^"]{1,})"/gi,sev:"critical"},
+    {n:"Internal ID",re:/"(?:user_id|userId|account_id|accountId|internal_id|employee_id|admin_id)"\s*:\s*"?([^",}\]\s]{1,80})/gi,sev:"medium"},
+    {n:"Email",re:/"(?:email|mail|user_email|emailAddress)"\s*:\s*"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"/gi,sev:"low"},
+    {n:"Phone",re:/"(?:phone|mobile|phone_number|phoneNumber|tel)"\s*:\s*"?(\+?[\d\s()-]{7,20})/gi,sev:"medium"},
+    {n:"Internal URL",re:/"(?:url|endpoint|internal_url|host|backend_url|service_url)"\s*:\s*"(https?:\/\/(?:10\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.|localhost|127\.0\.)[^"]+)"/gi,sev:"high"},
+    {n:"AWS Resource",re:/arn:aws:[a-z0-9-]+:[a-z0-9-]*:\d{12}:[a-zA-Z0-9\/_.-]{5,}/g,sev:"high"},
+    {n:"Private Key",re:/-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----/g,sev:"critical"},
+    {n:"Hardcoded Stripe",re:/(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}/g,sev:"critical"},
+    {n:"Hardcoded GitHub",re:/gh[ps]_[A-Za-z0-9]{36,}/g,sev:"critical"},
+    {n:"Hardcoded JWT",re:/eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}/g,sev:"high"},
+    {n:"AWS Access Key",re:/AKIA[0-9A-Z]{16}/g,sev:"critical"},
+    {n:"Google API Key",re:/AIza[A-Za-z0-9_-]{35}/g,sev:"high"},
+    {n:"Credit Card",re:/\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{1,4}\b/g,sev:"critical"},
+    {n:"SSN Pattern",re:/\b\d{3}-\d{2}-\d{4}\b/g,sev:"critical"},
+    {n:"Stack Trace",re:/at\s+[\w$.]+\s*\([^)]*:\d+(?::\d+)?\)/g,sev:"medium"},
+    {n:"SQL Error",re:/(?:SQLSTATE|mysql_|pg_|ORA-\d{5}|syntax error.*SQL|near ".*": syntax)/gi,sev:"high"},
+    {n:"Admin Flag",re:/"(?:is_admin|isAdmin|is_superuser|is_staff)"\s*:\s*(true|1)/gi,sev:"high"},
+    {n:"Role/Scope",re:/"(?:role|roles|scope|scopes|permissions|groups)"\s*:\s*"?\[?([^",\}\]]{1,120})/gi,sev:"medium"}
+  ];
+  patterns.forEach(function(p){
+    p.re.lastIndex=0;
+    var m,cnt=0;
+    while((m=p.re.exec(body))!==null&&cnt<5){
+      cnt++;
+      var val=(m[1]||m[0]);
+      if(val.length>200)val=val.substring(0,200);
+      findings.push({type:p.n,severity:p.sev,value:val});
+    }
+  });
+  return findings;
+}
 
 R.errors.push("STEP 1: GraphQL ("+ctx.gqlPaths.length+" endpoints)");
 // === 1. GRAPHQL INTROSPECTION ===
@@ -1211,7 +1444,10 @@ async function probe(url){
   try{
     var c=new AbortController();
     var t=setTimeout(function(){c.abort();},8000);
-    var r=await fetch(url,{method:"HEAD",redirect:"manual",signal:c.signal});
+    var popts={method:"HEAD",redirect:"manual",signal:c.signal,credentials:"include"};
+    var mh=mergeCustomHeaders(null);
+    if(Object.keys(mh).length)popts.headers=mh;
+    var r=await fetch(url,popts);
     clearTimeout(t);
     return{status:r.status,ct:r.headers.get("content-type")||"",location:r.headers.get("location")||""};
   }catch(e){return{status:0,error:e.message};}
@@ -1766,11 +2002,11 @@ if(ctx.aggroLevel!=="careful"){
   var grpcPaths=ctx.grpcEndpoints||[];
   var grpcBasePaths=new Set();
   grpcPaths.forEach(function(g){
-    if(g.path)grpcBasePaths.add(g.path.replace(/\/[^/]*$/,""));
+    if(g.path){var li=g.path.lastIndexOf("/");grpcBasePaths.add(li>0?g.path.substring(0,li):g.path);}
   });
   if(!grpcBasePaths.size){
     var possibleGrpcBases=["/grpc","/api"];
-    ctx.apiPaths.forEach(function(p){if(/\/grpc/i.test(p))possibleGrpcBases.push(p);});
+    ctx.apiPaths.forEach(function(p){if(p.toLowerCase().indexOf("/grpc")>-1)possibleGrpcBases.push(p);});
     possibleGrpcBases.forEach(function(b){grpcBasePaths.add(b);});
   }
   for(var grpcBase of grpcBasePaths){
@@ -1949,6 +2185,167 @@ if(ctx.aggroLevel!=="careful"){
   }catch(e){R.errors.push("COOP/COEP: "+e.message);}
 }
 
+// ===== STEP 30: Smart Recursive API Discovery =====
+// v5.7: The killer feature. Collects every endpoint discovered in steps 1-29 (swagger paths,
+// source map endpoints, graphql introspection query fields, suffix brute hits, route definitions)
+// and actually PROBES them with GET requests. For each response that looks like JSON, we extract
+// new URLs from the body and feed them into the next wave. Three waves total. Findings inside
+// those responses get scanned for secrets, tokens, PII, and internal URLs and bubble up to the
+// main Secrets tab. Rate-limited and budget-capped to avoid hammering targets.
+R.errors.push("STEP 30: Recursive API Discovery");
+R.recursiveProbe={wave1:[],wave2:[],wave3:[],totalDiscovered:0,newUrlsFound:0,seedCount:0,skippedCount:0};
+if(ctx.recursive!==false){
+  var probedInRecursive={};
+  var observedPaths={};
+  (ctx.observedApis||[]).forEach(function(e){observedPaths[e.path]=1;});
+  (ctx.allEndpoints||[]).forEach(function(e){observedPaths[e.path]=1;});
+  var staticAssetRe=/\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|pdf|mp4|mp3|webp|wasm)(?:\?|$)/i;
+  var destructiveRe=/\/(?:delete|remove|destroy|purge|drop|revoke|ban|deactivate|unsubscribe|cancel|uninstall|wipe)(?:\/|$|\?)/i;
+  function shouldProbe(path){
+    if(!path||typeof path!=="string"||path.length<3||path.length>250)return false;
+    if(path.charAt(0)!=="/")return false;
+    if(observedPaths[path])return false;
+    if(staticAssetRe.test(path))return false;
+    // Skip templated paths — we can't guess placeholder values
+    if(/\{[^}]+\}/.test(path))return false;
+    if(/:[a-zA-Z_]/.test(path.replace(/^(?:https?:)?\/\/[^/]+/,"").replace(/^[^?]*\?/,""))&&path.indexOf(":")>-1&&path.indexOf(":")<path.length-1)return false;
+    // Destructive endpoints gated on aggroLevel
+    if(destructiveRe.test(path)&&ctx.aggroLevel!=="full")return false;
+    return true;
+  }
+  async function recursiveHit(path,wave){
+    if(probedInRecursive[path])return null;
+    probedInRecursive[path]=1;
+    var fullUrl=path.indexOf("://")>-1?path:(location.origin+(path.charAt(0)==="/"?path:"/"+path));
+    try{
+      var resp=await sf(fullUrl,{method:"GET"},200000);
+      if(resp.status===0)return null;
+      var newUrls=[];
+      var findings=[];
+      if(resp.body&&resp.body.length>20){
+        var ctLower=(resp.ct||"").toLowerCase();
+        var looksJson=ctLower.indexOf("json")>-1||resp.body.charAt(0)==="{"||resp.body.charAt(0)==="[";
+        var looksText=ctLower.indexOf("text")>-1||ctLower.indexOf("html")>-1||ctLower.indexOf("xml")>-1||looksJson;
+        if(looksText){
+          newUrls=extractUrlsFromBody(resp.body);
+          findings=scanBodyForFindings(resp.body);
+        }
+      }
+      return{
+        path:path,
+        url:fullUrl,
+        status:resp.status,
+        size:resp.size||resp.body.length,
+        contentType:resp.ct,
+        bodyPreview:resp.body.substring(0,600),
+        newUrls:newUrls,
+        findings:findings,
+        wave:wave
+      };
+    }catch(e){return null;}
+  }
+  // === SEED: collect every known unobserved API path from prior steps ===
+  var seedUrls={};
+  function addSeed(path,origin){
+    if(!shouldProbe(path))return;
+    if(!seedUrls[path])seedUrls[path]=origin||"unknown";
+  }
+  // From swagger
+  (R.swagger||[]).forEach(function(sw){
+    var basePath=sw.basePath||"";
+    (sw.paths||[]).forEach(function(p){
+      if(p.path&&p.path.charAt(0)==="/"){
+        var hasParams=/\{[^}]+\}/.test(p.path);
+        if(!hasParams)addSeed(basePath+p.path,"swagger");
+      }
+    });
+  });
+  // From source maps
+  (R.sourceMaps||[]).forEach(function(sm){
+    (sm.endpoints||[]).forEach(function(ep){addSeed(ep.path,"sourcemap");});
+  });
+  // From suffix brute hits (only 2xx — 401/403 means auth-gated, already tested)
+  (R.suffixes||[]).forEach(function(s){if(s.status===200)addSeed(s.path,"suffix-brute");});
+  // From passive-discovered routes passed in via ctx
+  (ctx.discoveredApis||[]).forEach(function(r){addSeed(r.path,"discovered");});
+  // From well-known path probes that came back interesting
+  (R.probes||[]).forEach(function(p){if(p.interesting&&p.status===200&&p.path)addSeed(p.path,"well-known");});
+  // From GraphQL query fields — probe /graphql with the query
+  if(R.graphql&&R.graphql.endpoint&&(R.graphql.queryFields||[]).length){
+    // handled separately below as POST requests
+  }
+  R.recursiveProbe.seedCount=Object.keys(seedUrls).length;
+  R.errors.push("Recursive seed: "+R.recursiveProbe.seedCount+" URLs (filtered from prior steps)");
+  // Budget per aggro level
+  var waveBudgets={careful:[20,15,10],medium:[40,25,15],full:[60,40,25]};
+  var budgets=waveBudgets[ctx.aggroLevel]||waveBudgets.medium;
+  // === WAVE 1: probe seeds ===
+  var wave1List=Object.keys(seedUrls).slice(0,budgets[0]);
+  R.recursiveProbe.skippedCount=R.recursiveProbe.seedCount-wave1List.length;
+  for(var wi1=0;wi1<wave1List.length;wi1++){
+    var r1=await recursiveHit(wave1List[wi1],1);
+    if(r1)R.recursiveProbe.wave1.push(r1);
+    if(wi1%4===3)await delay(120);
+  }
+  // === WAVE 2: probe newUrls found in wave 1 responses ===
+  var wave2Set={};
+  R.recursiveProbe.wave1.forEach(function(r){
+    (r.newUrls||[]).forEach(function(u){if(shouldProbe(u)&&!probedInRecursive[u]&&!wave2Set[u])wave2Set[u]=1;});
+  });
+  var wave2List=Object.keys(wave2Set).slice(0,budgets[1]);
+  R.errors.push("Recursive wave 2: "+wave2List.length+" new URLs from wave 1");
+  for(var wi2=0;wi2<wave2List.length;wi2++){
+    var r2=await recursiveHit(wave2List[wi2],2);
+    if(r2)R.recursiveProbe.wave2.push(r2);
+    if(wi2%4===3)await delay(120);
+  }
+  // === WAVE 3: probe newUrls found in wave 2 responses ===
+  var wave3Set={};
+  R.recursiveProbe.wave2.forEach(function(r){
+    (r.newUrls||[]).forEach(function(u){if(shouldProbe(u)&&!probedInRecursive[u]&&!wave3Set[u])wave3Set[u]=1;});
+  });
+  var wave3List=Object.keys(wave3Set).slice(0,budgets[2]);
+  R.errors.push("Recursive wave 3: "+wave3List.length+" new URLs from wave 2");
+  for(var wi3=0;wi3<wave3List.length;wi3++){
+    var r3=await recursiveHit(wave3List[wi3],3);
+    if(r3)R.recursiveProbe.wave3.push(r3);
+    if(wi3%4===3)await delay(120);
+  }
+  // === BONUS: GraphQL query field probing ===
+  // If introspection succeeded, try each query field with an empty body {query:"{fieldName}"}
+  // to discover which ones don't require auth or arguments.
+  if(R.graphql&&R.graphql.endpoint&&(R.graphql.queryFields||[]).length){
+    var gqlUrl=R.graphql.endpoint.charAt(0)==="/"?(location.origin+R.graphql.endpoint):R.graphql.endpoint;
+    var fields=R.graphql.queryFields.slice(0,15);
+    for(var gfi=0;gfi<fields.length;gfi++){
+      var fname=fields[gfi].name;
+      if(!fname)continue;
+      try{
+        var gResp=await sf(gqlUrl,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:"{"+fname+"{__typename}}"})},100000);
+        if(gResp.status<400&&gResp.body.indexOf('"errors"')===-1&&gResp.body.length>20){
+          var gFindings=scanBodyForFindings(gResp.body);
+          R.recursiveProbe.wave1.push({
+            path:"GraphQL:"+fname,
+            url:gqlUrl,
+            status:gResp.status,
+            size:gResp.body.length,
+            contentType:gResp.ct,
+            bodyPreview:gResp.body.substring(0,600),
+            newUrls:[],
+            findings:gFindings,
+            wave:1,
+            isGraphQL:true
+          });
+        }
+      }catch(e){}
+      if(gfi%3===2)await delay(150);
+    }
+  }
+  R.recursiveProbe.totalDiscovered=R.recursiveProbe.wave1.length+R.recursiveProbe.wave2.length+R.recursiveProbe.wave3.length;
+  R.recursiveProbe.newUrlsFound=Object.keys(wave2Set).length+Object.keys(wave3Set).length;
+  R.errors.push("Recursive probe done: "+R.recursiveProbe.totalDiscovered+" endpoints probed, "+R.recursiveProbe.newUrlsFound+" new URLs discovered in responses");
+}
+
 R.errors.push("STEP 29: Storage Partition Test");
 if(ctx.aggroLevel==="full"){
   try{
@@ -2009,8 +2406,33 @@ return JSON.stringify(R);
 
   return new Promise(resolve=>{
     // Inject ctx as window property first — pure JSON.stringify, no escaping needed
-    const setupExpr='window.__ps_ctx='+JSON.stringify(ctx)+';void 0';
-    chrome.debugger.sendCommand({tabId},"Runtime.evaluate",{expression:setupExpr,returnByValue:true},()=>{
+    // Phase 1: Serialize ctx
+    let setupExpr;
+    try{
+      const ctxStr=JSON.stringify(ctx);
+      setupExpr='window.__ps_ctx='+ctxStr+';void 0';
+      console.log('[PenScope Probe] ctx serialized OK, length='+ctxStr.length+', setupExpr length='+setupExpr.length);
+    }catch(e){
+      const err="PROBE FAIL [Phase 1: ctx serialize]: "+e.message;
+      console.error('[PenScope]',err);
+      tab.probeData.status="error";tab.probeData.error=err;resolve(tab.probeData);return;
+    }
+    // Phase 2: Inject ctx into page
+    console.log('[PenScope Probe] Phase 2: injecting ctx via Runtime.evaluate ('+setupExpr.length+' chars)');
+    chrome.debugger.sendCommand({tabId},"Runtime.evaluate",{expression:setupExpr,returnByValue:true},(setupResult)=>{
+    if(chrome.runtime.lastError){
+      const err="PROBE FAIL [Phase 2: ctx injection chrome error]: "+JSON.stringify(chrome.runtime.lastError);
+      console.error('[PenScope]',err);
+      tab.probeData.status="error";tab.probeData.error=err;resolve(tab.probeData);return;
+    }
+    if(setupResult?.exceptionDetails){
+      const ex=setupResult.exceptionDetails;
+      const err="PROBE FAIL [Phase 2: ctx injection JS exception]: "+(ex.text||"unknown")+" | "+(ex.exception?.description||ex.exception?.value||"no description")+" | line="+(ex.lineNumber||"?")+" col="+(ex.columnNumber||"?");
+      console.error('[PenScope]',err);
+      tab.probeData.status="error";tab.probeData.error=err;resolve(tab.probeData);return;
+    }
+    console.log('[PenScope Probe] Phase 2 OK, ctx injected. Phase 3: running eval script ('+evalScript.length+' chars)');
+    // Phase 3: Run the probe eval script
     chrome.debugger.sendCommand({tabId},"Runtime.evaluate",{
       expression:evalScript,
       awaitPromise:true,
@@ -2018,21 +2440,29 @@ return JSON.stringify(R);
       timeout:180000
     },(result)=>{
       if(chrome.runtime.lastError){
-        tab.probeData.status="error";
-        tab.probeData.error="Chrome error: "+(chrome.runtime.lastError.message||"unknown");
-        resolve(tab.probeData);return;
+        const err="PROBE FAIL [Phase 3: eval chrome error]: "+JSON.stringify(chrome.runtime.lastError);
+        console.error('[PenScope]',err);
+        tab.probeData.status="error";tab.probeData.error=err;resolve(tab.probeData);return;
       }
-      // Check for exception in the eval result
       if(result?.exceptionDetails){
         const ex=result.exceptionDetails;
-        tab.probeData.status="error";
-        tab.probeData.error="JS exception: "+(ex.text||"")+" "+(ex.exception?.description||ex.exception?.value||"").substring(0,300);
-        resolve(tab.probeData);return;
+        const err="PROBE FAIL [Phase 3: eval JS exception]: "
+          +"text="+(ex.text||"none")
+          +" | description="+(ex.exception?.description||ex.exception?.value||"none").substring(0,500)
+          +" | line="+(ex.lineNumber||"?")
+          +" | col="+(ex.columnNumber||"?")
+          +" | scriptId="+(ex.scriptId||"?")
+          +" | stackTrace="+JSON.stringify(ex.stackTrace||{}).substring(0,500)
+          +" | evalScript.length="+evalScript.length
+          +" | evalScript[0:100]="+evalScript.substring(0,100)
+          +" | evalScript[-100:]="+evalScript.substring(evalScript.length-100);
+        console.error('[PenScope]',err);
+        tab.probeData.status="error";tab.probeData.error=err;resolve(tab.probeData);return;
       }
       if(!result||!result.result||!result.result.value){
-        tab.probeData.status="error";
-        tab.probeData.error="No result value. result.result.type="+(result?.result?.type||"?")+" subtype="+(result?.result?.subtype||"?");
-        resolve(tab.probeData);return;
+        const err="PROBE FAIL [Phase 3: no result]: type="+(result?.result?.type||"?")+" subtype="+(result?.result?.subtype||"?")+" value="+(result?.result?.value===undefined?"undefined":result?.result?.value===null?"null":"'"+String(result?.result?.value).substring(0,100)+"'");
+        console.error('[PenScope]',err);
+        tab.probeData.status="error";tab.probeData.error=err;resolve(tab.probeData);return;
       }
       try{
         const data=JSON.parse(result.result.value);
@@ -2066,6 +2496,30 @@ return JSON.stringify(R);
         if(data.timingOracle?.length)tab.timingOracle=data.timingOracle;
         if(data.coopCoepBypass?.length&&!tab.coopCoepInfo)tab.coopCoepInfo={probeResults:data.coopCoepBypass};
         if(data.storagePartition?.length)tab.storagePartition=data.storagePartition;
+        // v5.7: Merge recursive probe results — feed discovered URLs back into routes and
+        // findings back into the main Secrets list. This closes the loop so recursive probing
+        // actually contributes to the final report instead of sitting in a parallel silo.
+        if(data.recursiveProbe){
+          const allWaves=[...(data.recursiveProbe.wave1||[]),...(data.recursiveProbe.wave2||[]),...(data.recursiveProbe.wave3||[])];
+          allWaves.forEach(r=>{
+            // Each hit becomes a discovered route (if it's a new path)
+            if(r.path&&r.path.charAt(0)==="/"&&!seen(tabId,"dr","rec:"+r.path)){
+              tab.discoveredRoutes.push({path:r.path,source:"recursive-probe-wave"+r.wave,type:"probed-"+r.status,context:`${r.size}B ${r.contentType||""}`.trim(),observed:true});
+            }
+            // Every URL extracted FROM a response becomes a discovered route too
+            (r.newUrls||[]).forEach(u=>{
+              if(!seen(tabId,"dr","recnew:"+u))tab.discoveredRoutes.push({path:u,source:"recursive-response-scrape",type:"endpoint",context:"extracted from "+(r.path||"")});
+            });
+            // Findings bubble up to the Secrets tab
+            (r.findings||[]).forEach(f=>{
+              const fp="recfind:"+f.type+":"+String(f.value).substring(0,40);
+              if(!seen(tabId,"secrec",fp)){
+                tab.secrets.push({type:f.type+" (probe)",value:String(f.value),severity:f.severity||"medium",source:"recursive:"+(r.path||""),context:`${r.status} ${r.contentType||""}`.trim()});
+              }
+            });
+          });
+        }
+        markDirty(tabId);
         resolve(tab.probeData);
       }catch(e){
         tab.probeData.status="error";
@@ -2122,11 +2576,32 @@ function deepScanBody(body,url){
   return findings;
 }
 
-// JS/CSS Coverage Analysis — find dead code = hidden features
+// JS/CSS Coverage Analysis — find dead code = hidden features.
+// v5.6: Profiler stays running for tab lifetime so SPA route changes keep accumulating coverage.
+// Snapshots merge old unused-function lists with new ones — once a function fires, it stops
+// appearing as dead code.
+function takeCoverageSnapshot(tabId){
+  if(!_debugTabs.has(tabId))return;
+  const tab=T(tabId);
+  if(!tab._coverageStarted)return;
+  chrome.debugger.sendCommand({tabId},"Profiler.takePreciseCoverage",{},(result)=>{
+    if(chrome.runtime.lastError||!result)return;
+    const scripts=(result.result||[]).filter(s=>s.url&&s.url.startsWith("http")&&!s.url.includes("extension"));
+    const coverage=[];
+    scripts.forEach(script=>{
+      const totalBytes=script.functions.reduce((sum,f)=>sum+f.ranges.reduce((s,r)=>s+(r.endOffset-r.startOffset),0),0);
+      const usedBytes=script.functions.reduce((sum,f)=>sum+f.ranges.filter(r=>r.count>0).reduce((s,r)=>s+(r.endOffset-r.startOffset),0),0);
+      const pct=totalBytes>0?Math.round(usedBytes/totalBytes*100):0;
+      const unusedFunctions=script.functions.filter(f=>f.ranges.every(r=>r.count===0)&&f.functionName).map(f=>f.functionName).slice(0,50);
+      if(totalBytes>1000)coverage.push({url:script.url.substring(0,150),totalBytes,usedBytes,unusedBytes:totalBytes-usedBytes,usedPercent:pct,unusedFunctions});
+    });
+    coverage.sort((a,b)=>b.unusedBytes-a.unusedBytes);
+    tab.coverageData={scripts:coverage.slice(0,50),totalScripts:scripts.length,totalBytes:coverage.reduce((s,c)=>s+c.totalBytes,0),totalUsed:coverage.reduce((s,c)=>s+c.usedBytes,0),snapshotAt:Date.now()};
+  });
+}
 function runCoverageAnalysis(tabId){
   if(!_debugTabs.has(tabId))return;
   const tab=T(tabId);
-  if(tab.coverageData&&tab.coverageData.totalScripts>0)return;
   if(!tab._coverageStarted){
     tab._coverageStarted=true;
     chrome.debugger.sendCommand({tabId},"Profiler.enable",{},()=>{
@@ -2136,27 +2611,7 @@ function runCoverageAnalysis(tabId){
     });
     return;
   }
-  chrome.debugger.sendCommand({tabId},"Profiler.takePreciseCoverage",{},(result)=>{
-    if(chrome.runtime.lastError||!result)return;
-    chrome.debugger.sendCommand({tabId},"Profiler.stopPreciseCoverage",{});
-    chrome.debugger.sendCommand({tabId},"Profiler.disable",{});
-    tab._coverageStarted=false;
-    const scripts=(result.result||[]).filter(s=>s.url&&s.url.startsWith("http")&&!s.url.includes("extension"));
-    const coverage=[];
-    scripts.forEach(script=>{
-      const totalBytes=script.functions.reduce((sum,f)=>{
-        return sum+f.ranges.reduce((s,r)=>s+(r.endOffset-r.startOffset),0);
-      },0);
-      const usedBytes=script.functions.reduce((sum,f)=>{
-        return sum+f.ranges.filter(r=>r.count>0).reduce((s,r)=>s+(r.endOffset-r.startOffset),0);
-      },0);
-      const pct=totalBytes>0?Math.round(usedBytes/totalBytes*100):0;
-      const unusedFunctions=script.functions.filter(f=>f.ranges.every(r=>r.count===0)&&f.functionName).map(f=>f.functionName).slice(0,50);
-      if(totalBytes>1000)coverage.push({url:script.url.substring(0,150),totalBytes,usedBytes,unusedBytes:totalBytes-usedBytes,usedPercent:pct,unusedFunctions});
-    });
-    coverage.sort((a,b)=>b.unusedBytes-a.unusedBytes);
-    tab.coverageData={scripts:coverage.slice(0,50),totalScripts:scripts.length,totalBytes:coverage.reduce((s,c)=>s+c.totalBytes,0),totalUsed:coverage.reduce((s,c)=>s+c.usedBytes,0)};
-  });
+  takeCoverageSnapshot(tabId);
 }
 
 // Event Listener Enumeration — find all handlers on DOM nodes
@@ -2245,7 +2700,10 @@ function pierceShadowDOM(tabId){
   });
 }
 
-// Memory String Mining — search V8 runtime for leaked secrets
+// Memory String Mining — search V8 runtime for leaked secrets.
+// v5.6 rewrite: substring scanning instead of anchored regex, deeper traversal, JSON.stringify of
+// nested objects. The old version only matched standalone strings like val==="AKIA..." and missed
+// everything embedded in headers/JSON values/cookie blobs, which is where real secrets actually live.
 function mineMemoryStrings(tabId){
   if(!_debugTabs.has(tabId))return;
   const tab=T(tabId);
@@ -2254,61 +2712,163 @@ function mineMemoryStrings(tabId){
   chrome.debugger.sendCommand({tabId},"Runtime.evaluate",{
     expression:`(function(){
       var found=[];
-      var seen={};
-      function check(val,source){
-        if(!val||typeof val!=="string"||val.length<8||val.length>2000)return;
-        if(seen[val])return;seen[val]=1;
-        // JWT
-        if(val.match(/^eyJ[A-Za-z0-9_-]{10,}\\.eyJ/))found.push({type:"JWT",value:val.substring(0,80)+"...",source:source});
-        // AWS key
-        if(val.match(/^AKIA[A-Z0-9]{16}$/))found.push({type:"AWS Access Key",value:val,source:source});
-        // API key patterns
-        if(val.match(/^(?:sk|pk|rk)_(?:live|test|prod)_[A-Za-z0-9]{20,}$/))found.push({type:"Stripe Key",value:val.substring(0,20)+"...",source:source});
-        // Bearer token
-        if(val.match(/^Bearer [A-Za-z0-9._-]{20,}$/))found.push({type:"Bearer Token",value:val.substring(0,30)+"...",source:source});
-        // Internal URLs
-        if(val.match(/^https?:\\/\\/(?:10\\.|172\\.(?:1[6-9]|2\\d|3[01])\\.|192\\.168\\.|localhost|127\\.0\\.)/))found.push({type:"Internal URL",value:val.substring(0,100),source:source});
-        // Connection strings
-        if(val.match(/^(?:mongodb|postgres|mysql|redis|amqp):\\/\\//))found.push({type:"Connection String",value:val.substring(0,60)+"...",source:source});
-        // GitHub token
-        if(val.match(/^ghp_[A-Za-z0-9]{36}$/))found.push({type:"GitHub Token",value:val.substring(0,10)+"...",source:source});
-        // Generic long secret (base64-like, 32+ chars)
-        if(val.match(/^[A-Za-z0-9+/=_-]{32,128}$/)&&!val.match(/^[a-z]+$/)&&!val.match(/^[A-Z]+$/)&&val.length>=40){
-          // Check entropy
-          var chars={};for(var i=0;i<val.length;i++)chars[val[i]]=(chars[val[i]]||0)+1;
-          var entropy=0;var len=val.length;
-          for(var c in chars){var p=chars[c]/len;entropy-=p*Math.log2(p);}
-          if(entropy>3.5)found.push({type:"High-Entropy Secret",value:val.substring(0,40)+"...",source:source,entropy:Math.round(entropy*10)/10});
+      var seenFp={};
+      // Substring patterns — each one scans for occurrences of the prefix, then expands to a match.
+      // All prefixes are unique enough to avoid scanning large strings redundantly.
+      var PREFIXES=[
+        {t:"JWT",p:"eyJ",re:/eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}(?:\\.[A-Za-z0-9_-]+)?/g,sev:"high"},
+        {t:"AWS Access Key",p:"AKIA",re:/AKIA[0-9A-Z]{16}/g,sev:"critical"},
+        {t:"AWS Temp Key",p:"ASIA",re:/ASIA[0-9A-Z]{16}/g,sev:"critical"},
+        {t:"Stripe Key",p:"sk_live_",re:/sk_live_[A-Za-z0-9]{20,}/g,sev:"critical"},
+        {t:"Stripe Key",p:"sk_test_",re:/sk_test_[A-Za-z0-9]{20,}/g,sev:"critical"},
+        {t:"Stripe Key",p:"pk_live_",re:/pk_live_[A-Za-z0-9]{20,}/g,sev:"high"},
+        {t:"Stripe Restricted",p:"rk_live_",re:/rk_live_[A-Za-z0-9]{20,}/g,sev:"critical"},
+        {t:"GitHub Token",p:"ghp_",re:/ghp_[A-Za-z0-9]{36,}/g,sev:"critical"},
+        {t:"GitHub Server Token",p:"ghs_",re:/ghs_[A-Za-z0-9]{36,}/g,sev:"critical"},
+        {t:"GitHub User Token",p:"gho_",re:/gho_[A-Za-z0-9]{36,}/g,sev:"critical"},
+        {t:"GitHub PAT",p:"github_pat_",re:/github_pat_[A-Za-z0-9_]{22,}/g,sev:"critical"},
+        {t:"GitLab PAT",p:"glpat-",re:/glpat-[A-Za-z0-9_-]{20,}/g,sev:"critical"},
+        {t:"Slack Bot Token",p:"xoxb-",re:/xoxb-[0-9A-Za-z-]{10,}/g,sev:"critical"},
+        {t:"Slack User Token",p:"xoxp-",re:/xoxp-[0-9A-Za-z-]{10,}/g,sev:"critical"},
+        {t:"SendGrid",p:"SG.",re:/SG\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}/g,sev:"critical"},
+        {t:"OpenAI Key",p:"sk-",re:/sk-[A-Za-z0-9]{20,}T3BlbkFJ[A-Za-z0-9]{20,}/g,sev:"critical"},
+        {t:"Anthropic Key",p:"sk-ant-",re:/sk-ant-api03-[A-Za-z0-9_-]{90,}/g,sev:"critical"},
+        {t:"HuggingFace",p:"hf_",re:/hf_[A-Za-z0-9]{30,}/g,sev:"high"},
+        {t:"Google API Key",p:"AIza",re:/AIza[A-Za-z0-9_-]{35}/g,sev:"high"},
+        {t:"Google OAuth ID",p:".apps.googleusercontent.com",re:/[0-9]+-[0-9A-Za-z_]{32}\\.apps\\.googleusercontent\\.com/g,sev:"medium"},
+        {t:"Google OAuth Secret",p:"GOCSPX-",re:/GOCSPX-[A-Za-z0-9_-]{28}/g,sev:"critical"},
+        {t:"Vault Token",p:"hvs.",re:/hvs\\.[A-Za-z0-9_-]{24,}/g,sev:"critical"},
+        {t:"npm Token",p:"npm_",re:/npm_[A-Za-z0-9]{36}/g,sev:"critical"},
+        {t:"Twilio SID",p:"AC",re:/AC[a-f0-9]{32}/g,sev:"high"},
+        {t:"Shopify",p:"shpat_",re:/shpat_[a-fA-F0-9]{32}/g,sev:"critical"},
+        {t:"DigitalOcean",p:"dop_v1_",re:/dop_v1_[a-f0-9]{64}/g,sev:"critical"},
+        {t:"MongoDB URI",p:"mongodb",re:/mongodb(?:\\+srv)?:\\/\\/[^\\s"'<>]{10,200}/g,sev:"critical"},
+        {t:"Postgres URI",p:"postgres",re:/postgres(?:ql)?:\\/\\/[^\\s"'<>]{10,200}/g,sev:"critical"},
+        {t:"MySQL URI",p:"mysql:",re:/mysql:\\/\\/[^\\s"'<>]{10,200}/g,sev:"critical"},
+        {t:"Redis URI",p:"redis:",re:/redis(?:s)?:\\/\\/[^\\s"'<>]{10,200}/g,sev:"high"},
+        {t:"Private Key",p:"-----BEGIN",re:/-----BEGIN [A-Z ]*PRIVATE KEY(?:\\sBLOCK)?-----/g,sev:"critical"},
+        {t:"Bearer Token",p:"Bearer ",re:/Bearer [A-Za-z0-9._\\-+/=]{20,500}/g,sev:"high"},
+        {t:"Basic Auth",p:"Basic ",re:/Basic [A-Za-z0-9+/=]{15,200}/g,sev:"high"},
+        {t:"Internal URL",p:"://10.",re:/https?:\\/\\/10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}(?::\\d+)?(?:\\/[^\\s"'<>]*)?/g,sev:"medium"},
+        {t:"Internal URL",p:"://192.168.",re:/https?:\\/\\/192\\.168\\.\\d{1,3}\\.\\d{1,3}(?::\\d+)?(?:\\/[^\\s"'<>]*)?/g,sev:"medium"},
+        {t:"Internal URL",p:"://172.",re:/https?:\\/\\/172\\.(?:1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}(?::\\d+)?(?:\\/[^\\s"'<>]*)?/g,sev:"medium"},
+        {t:"Internal URL",p:"://localhost",re:/https?:\\/\\/localhost(?::\\d+)?(?:\\/[^\\s"'<>]*)?/g,sev:"medium"},
+        {t:"AWS ARN",p:"arn:aws:",re:/arn:aws:[a-z0-9-]+:[a-z0-9-]*:\\d{12}:[a-zA-Z0-9/_-]+/g,sev:"medium"},
+        {t:"Sentry DSN",p:".ingest.sentry.io",re:/https:\\/\\/[a-f0-9]{32}@[a-z0-9.]+\\.ingest\\.sentry\\.io\\/\\d+/g,sev:"medium"},
+        {t:"Slack Webhook",p:"hooks.slack.com",re:/https:\\/\\/hooks\\.slack\\.com\\/services\\/[A-Za-z0-9/]+/g,sev:"high"},
+        {t:"Discord Webhook",p:"discord.com/api/webhooks",re:/https:\\/\\/(?:discord|discordapp)\\.com\\/api\\/webhooks\\/\\d+\\/[A-Za-z0-9_-]+/g,sev:"high"}
+      ];
+      function scan(str,source){
+        if(!str||typeof str!=="string"||str.length<8)return;
+        if(str.length>500000)str=str.substring(0,500000);
+        for(var i=0;i<PREFIXES.length;i++){
+          var pat=PREFIXES[i];
+          if(str.indexOf(pat.p)===-1)continue;
+          pat.re.lastIndex=0;
+          var m,cnt=0;
+          while((m=pat.re.exec(str))!==null&&cnt<5){
+            cnt++;
+            var val=m[0];
+            var fp=pat.t+":"+val.substring(0,40);
+            if(seenFp[fp])continue;
+            seenFp[fp]=1;
+            found.push({type:pat.t,value:val.length>200?val.substring(0,200)+"...":val,source:source,severity:pat.sev,length:val.length});
+          }
         }
       }
-      // Walk window properties (2 levels deep)
+      function walk(obj,path,depth){
+        if(obj==null||depth>6||found.length>300)return;
+        var t=typeof obj;
+        if(t==="string"){scan(obj,path);return;}
+        if(t==="number"||t==="boolean")return;
+        if(t==="function"){try{scan(obj.toString().substring(0,5000),path+"()");}catch(e){}return;}
+        if(t!=="object")return;
+        // Try JSON.stringify for a single-pass scan of the entire subtree
+        try{
+          var s=JSON.stringify(obj);
+          if(s&&s.length<200000){scan(s,path);return;}
+        }catch(e){}
+        // Fallback: walk manually if stringify fails (circular) or the object is huge
+        try{
+          var keys=Array.isArray(obj)?obj.slice(0,20).map(function(_,i){return i;}):Object.keys(obj).slice(0,60);
+          for(var i=0;i<keys.length&&found.length<300;i++){
+            try{walk(obj[keys[i]],path+"."+keys[i],depth+1);}catch(e){}
+          }
+        }catch(e){}
+      }
+      var skip={chrome:1,document:1,window:1,self:1,top:1,parent:1,frames:1,location:1,navigator:1,performance:1,screen:1,history:1,console:1,localStorage:1,sessionStorage:1,fetch:1,XMLHttpRequest:1,Array:1,Object:1,String:1,Number:1,Boolean:1,Function:1,RegExp:1,Date:1,Math:1,JSON:1,Promise:1,Map:1,Set:1,WeakMap:1,WeakSet:1,Symbol:1,Proxy:1,Reflect:1,Error:1,Buffer:1};
+      // Walk all window properties to 6 levels deep (via JSON.stringify)
       try{
-        var winKeys=Object.getOwnPropertyNames(window).slice(0,300);
-        winKeys.forEach(function(k){
+        var winKeys=Object.getOwnPropertyNames(window).slice(0,500);
+        for(var wi=0;wi<winKeys.length;wi++){
+          var k=winKeys[wi];
+          if(skip[k]||k.charAt(0)==="_"&&k.charAt(1)!=="_")continue;
           try{
             var v=window[k];
-            if(typeof v==="string")check(v,"window."+k);
-            else if(v&&typeof v==="object"&&!Array.isArray(v)){
-              Object.keys(v).slice(0,50).forEach(function(k2){
-                try{if(typeof v[k2]==="string")check(v[k2],"window."+k+"."+k2);}catch(e){}
-              });
-            }
+            if(v==null)continue;
+            walk(v,"window."+k,0);
           }catch(e){}
+          if(found.length>=300)break;
+        }
+      }catch(e){}
+      // localStorage — scan values AND try JSON-parsed sub-values
+      try{for(var i=0;i<localStorage.length;i++){
+        var lk=localStorage.key(i);var lv=localStorage.getItem(lk);
+        if(!lv)continue;
+        scan(lv,"localStorage."+lk);
+        if(lv.charAt(0)==="{"||lv.charAt(0)==="["){try{walk(JSON.parse(lv),"localStorage."+lk,0);}catch(e){}}
+      }}catch(e){}
+      try{for(var i=0;i<sessionStorage.length;i++){
+        var sk=sessionStorage.key(i);var sv=sessionStorage.getItem(sk);
+        if(!sv)continue;
+        scan(sv,"sessionStorage."+sk);
+        if(sv.charAt(0)==="{"||sv.charAt(0)==="["){try{walk(JSON.parse(sv),"sessionStorage."+sk,0);}catch(e){}}
+      }}catch(e){}
+      // Cookies — scan values and decoded JSON cookies
+      try{
+        document.cookie.split(";").forEach(function(c){
+          var parts=c.trim().split("=");if(parts.length<2)return;
+          var name=parts[0];var val=parts.slice(1).join("=");
+          scan(val,"cookie."+name);
+          try{var decoded=decodeURIComponent(val);if(decoded!==val)scan(decoded,"cookie."+name+"(decoded)");}catch(e){}
         });
       }catch(e){}
-      // Walk localStorage and sessionStorage
-      try{for(var i=0;i<localStorage.length;i++){var key=localStorage.key(i);check(localStorage.getItem(key),"localStorage."+key);}}catch(e){}
-      try{for(var i=0;i<sessionStorage.length;i++){var key=sessionStorage.key(i);check(sessionStorage.getItem(key),"sessionStorage."+key);}}catch(e){}
-      // Check meta tags
-      try{document.querySelectorAll("meta[content]").forEach(function(m){check(m.content,"meta."+m.name);});}catch(e){}
-      // Check cookies
-      try{document.cookie.split(";").forEach(function(c){var parts=c.trim().split("=");if(parts.length>=2)check(parts.slice(1).join("="),"cookie."+parts[0].trim());});}catch(e){}
-      return JSON.stringify(found);
+      // Meta tags
+      try{document.querySelectorAll("meta[content]").forEach(function(m){if(m.content)scan(m.content,"meta."+(m.name||m.getAttribute("property")||"?"));});}catch(e){}
+      // Hidden inputs and data-* attributes
+      try{document.querySelectorAll("input[type=hidden][value],[data-token],[data-auth],[data-config],[data-payload]").forEach(function(el){
+        if(el.value)scan(el.value,"input."+(el.name||el.id||"?"));
+        for(var ai=0;ai<el.attributes.length;ai++){
+          var a=el.attributes[ai];
+          if(a.name.indexOf("data-")===0&&a.value)scan(a.value,"dom."+a.name);
+        }
+      });}catch(e){}
+      // Inline scripts — often contain config blobs with tokens
+      try{
+        var inlineTotal="";
+        document.querySelectorAll("script:not([src])").forEach(function(s){
+          var t=s.textContent||"";if(t.length<10||t.length>200000)return;
+          inlineTotal+=t+"\\n";
+        });
+        if(inlineTotal.length>20&&inlineTotal.length<500000)scan(inlineTotal,"inline-scripts");
+      }catch(e){}
+      return JSON.stringify(found.slice(0,200));
     })()`,
-    returnByValue:true
+    returnByValue:true,
+    timeout:15000
   },(result)=>{
     if(chrome.runtime.lastError||!result?.result?.value)return;
-    try{tab.memoryStrings=JSON.parse(result.result.value);}catch(e){console.warn('[PenScope] mineMemoryStrings',e.message||e);}
+    try{
+      const found=JSON.parse(result.result.value);
+      tab.memoryStrings=found;
+      // Promote into main secrets list with proper severity
+      found.forEach(f=>{
+        const fp="mem:"+f.type+":"+String(f.value).substring(0,30);
+        if(!seen(tabId,"secmem",fp)){
+          tab.secrets.push({type:f.type+" (memory)",value:String(f.value),severity:f.severity||"high",source:"memory:"+f.source,context:"V8 heap/runtime"});
+        }
+      });
+    }catch(e){console.warn('[PenScope] mineMemoryStrings',e.message||e);}
   });
 }
 
@@ -2771,7 +3331,94 @@ function decodeAllJWTs(tabId){
   tab.jwtFindings=results;
 }
 
-// v5.4: WASM module detection via CDP
+// v5.6 WASM binary analysis — runs server-side when Network.getResponseBody returns base64-encoded
+// WASM. No page-context re-fetch, no URL-interpolation hazards, no race with existing modules.
+function processWasmBinary(tabId,url,b64body,status,mimeType){
+  const tab=T(tabId);
+  let bin;
+  try{bin=atob(b64body);}catch(e){console.warn('[PenScope] wasm atob',e.message||e);return;}
+  const size=bin.length;
+  if(size<8)return;
+  // WASM magic: \0asm version 1
+  const magic=bin.charCodeAt(0)===0x00&&bin.charCodeAt(1)===0x61&&bin.charCodeAt(2)===0x73&&bin.charCodeAt(3)===0x6d;
+  if(!magic)return;
+  let hex="";
+  for(let i=0;i<Math.min(size,512);i++){
+    const h=bin.charCodeAt(i).toString(16);
+    hex+=(h.length<2?"0":"")+h+" ";
+    if((i+1)%16===0)hex+="\n";
+  }
+  // Extract printable-string runs and look for toolchain/crypto/mining signatures.
+  // This works because WASM Custom Sections (name, producers, target_features, etc.) store
+  // human-readable strings that directly reveal how the module was built.
+  const signatures=[];const strings=[];let run="";let cryptoHit=false;let miningHit=false;let toolchain=null;
+  const scanLimit=Math.min(size,400000);
+  for(let i=0;i<scanLimit;i++){
+    const c=bin.charCodeAt(i);
+    if(c>=32&&c<=126)run+=String.fromCharCode(c);
+    else{
+      if(run.length>=4){
+        if(strings.length<200)strings.push(run);
+        if(/sha(?:256|512)|\baes\b|\brsa\b|hmac|pbkdf|scrypt|argon|bcrypt|chacha|ed25519|secp256|ecdsa/i.test(run))cryptoHit=true;
+        if(/stratum|hashrate|coinbase|CryptoNight|RandomX|minexmr|monero|webchain|coinhive/i.test(run))miningHit=true;
+        if(/wasm-bindgen|emscripten|AssemblyScript|rustc|rustwasm|Rust v|LLVM|clang version|tinygo|golang/i.test(run)){
+          if(signatures.length<20)signatures.push(run.substring(0,80));
+          if(!toolchain){
+            if(/wasm-bindgen/i.test(run))toolchain="Rust (wasm-bindgen)";
+            else if(/emscripten/i.test(run))toolchain="Emscripten (C/C++)";
+            else if(/AssemblyScript/i.test(run))toolchain="AssemblyScript";
+            else if(/rustc|Rust v|rustwasm/i.test(run))toolchain="Rust";
+            else if(/tinygo|golang/i.test(run))toolchain="Go (TinyGo)";
+            else if(/LLVM|clang/i.test(run))toolchain="LLVM/Clang";
+          }
+        }
+      }
+      run="";
+    }
+  }
+  // Count functions and memory sections via simple byte walker
+  let funcCount=0,importCount=0,exportCount=0;
+  try{
+    let p=8; // skip magic + version
+    while(p<size-1){
+      const sectId=bin.charCodeAt(p);p++;
+      // Read LEB128 section length
+      let sectLen=0,shift=0;
+      while(p<size){
+        const b=bin.charCodeAt(p);p++;
+        sectLen|=(b&0x7f)<<shift;
+        if(!(b&0x80))break;
+        shift+=7;if(shift>35)break;
+      }
+      if(sectId===2)importCount=sectLen;       // Import section exists
+      else if(sectId===3)funcCount=sectLen;    // Function section exists
+      else if(sectId===7)exportCount=sectLen;  // Export section exists
+      p+=sectLen;
+      if(p>size)break;
+    }
+  }catch(e){}
+  const magicHex=[];
+  for(let i=0;i<8;i++)magicHex.push(("0"+bin.charCodeAt(i).toString(16)).slice(-2));
+  const existing=tab.wasmModules.find(w=>w.url===url);
+  const entry={
+    url,size,fullSize:size,
+    source:"network-body",
+    status,mimeType,
+    hexDump:hex.substring(0,2048),
+    magic:magicHex.join(" "),
+    toolchain:toolchain||"unknown",
+    signatures:signatures.slice(0,10),
+    patterns:{crypto:cryptoHit,mining:miningHit,obfuscated:strings.length<5,signatures:signatures.slice(0,5)},
+    topStrings:strings.filter(s=>s.length>=6).slice(0,30),
+    timestamp:Date.now()
+  };
+  if(existing){Object.assign(existing,entry);}
+  else if(!seen(tabId,"wasm",url))tab.wasmModules.push(entry);
+}
+
+// v5.4/5.6: WASM module detection + capability probe. Binary analysis now happens in
+// processWasmBinary (server-side, from Network.getResponseBody). This function only detects
+// which modules exist and which WebAssembly/WebGPU features the runtime supports.
 function detectWasmModules(tabId){
   if(!_debugTabs.has(tabId))return;
   const tab=T(tabId);
@@ -2781,12 +3428,12 @@ function detectWasmModules(tabId){
       try{
         var entries=performance.getEntriesByType("resource");
         entries.forEach(function(e){
-          if(e.name&&(e.name.endsWith(".wasm")||e.name.includes(".wasm?")))
+          if(e.name&&(e.name.endsWith(".wasm")||e.name.indexOf(".wasm?")>-1))
             results.push({url:e.name,size:e.transferSize||0,duration:Math.round(e.duration),type:"network"});
         });
       }catch(e){}
       try{
-        var caps={wasmSupported:false,streaming:false,simd:false,threads:false,exceptions:false,gc:false,webgpu:false,webgpuAdapter:null};
+        var caps={type:"capability",wasmSupported:false,streaming:false,simd:false,threads:false,exceptions:false,gc:false,webgpu:false,webgpuAdapter:null};
         if(typeof WebAssembly!=="undefined"){
           caps.wasmSupported=true;
           caps.streaming=typeof WebAssembly.instantiateStreaming==="function";
@@ -2816,37 +3463,24 @@ function detectWasmModules(tabId){
     try{
       const modules=JSON.parse(result.result.value);
       modules.forEach(m=>{
-        if(m.url&&!seen(tabId,"wasm",m.url)){
+        if(m.url&&!tab.wasmModules.find(w=>w.url===m.url)){
           tab.wasmModules.push({url:m.url,size:m.size||0,duration:m.duration||0,source:"performance-api",timestamp:Date.now()});
         }
-        if(m.wasmSupported&&!tab.wasmModules.find(x=>x.type==="capability")){
-          tab.wasmModules.push({type:"capability",wasmSupported:true,streaming:m.streaming||false,simd:m.simd||false,threads:m.threads||false,webgpu:m.webgpu||false,webgpuAdapter:m.webgpuAdapter||null,source:"runtime-check"});
+        if(m.type==="capability"&&!tab.wasmModules.find(x=>x.type==="capability")){
+          tab.wasmModules.push({type:"capability",wasmSupported:m.wasmSupported,streaming:m.streaming||false,simd:m.simd||false,threads:m.threads||false,webgpu:m.webgpu||false,webgpuAdapter:m.webgpuAdapter||null,source:"runtime-check"});
           if(m.webgpu)tab.webgpuInfo={supported:true,adapter:m.webgpuAdapter,timestamp:Date.now()};
         }
       });
-    }catch(e){console.warn('[PenScope] wasmDetect',e);}
+    }catch(e){console.warn('[PenScope] wasmDetect',e.message||e);}
   });
   const scripts=_scripts[tabId];
   if(scripts){
     for(const[,info]of scripts){
-      if(info.url&&(info.url.endsWith(".wasm")||info.url.includes("wasm"))&&!seen(tabId,"wasm",info.url)){
+      if(info.url&&(info.url.endsWith(".wasm")||info.url.includes("wasm"))&&!tab.wasmModules.find(w=>w.url===info.url)){
         tab.wasmModules.push({url:info.url,source:"debugger-parsed",type:"script-reference",timestamp:Date.now()});
       }
     }
   }
-  tab.wasmModules.filter(w=>w.url&&w.url.startsWith("http")&&!w.hexDump&&w.type!=="capability").slice(0,5).forEach(w=>{
-    const safeUrl=w.url.replace(/\\/g,"\\\\").replace(/"/g,'\\"').replace(/\n/g,"");
-    chrome.debugger.sendCommand({tabId},"Runtime.evaluate",{
-      expression:`(async function(){try{var url="${safeUrl}";var r=await fetch(url);if(!r.ok)return JSON.stringify({error:"HTTP "+r.status});var buf=await r.arrayBuffer();var u8=new Uint8Array(buf);var hex="";for(var i=0;i<Math.min(u8.length,512);i++){var h=u8[i].toString(16);hex+=(h.length<2?"0":"")+h+" ";if((i+1)%16===0)hex+="\\n";}var patterns={crypto:false,mining:false,obfuscated:false,signatures:[]};var str="";for(var i=0;i<Math.min(u8.length,50000);i++){var c=u8[i];if(c>=32&&c<=126)str+=String.fromCharCode(c);else if(str.length>3){if(/sha256|sha512|aes|rsa|hmac|pbkdf|scrypt|argon/i.test(str))patterns.crypto=true;if(/stratum|mining|hashrate|nonce|difficulty|coinbase|CryptoNight|RandomX/i.test(str))patterns.mining=true;if(/wasm_bindgen|emscripten|AssemblyScript|rustwasm/i.test(str))patterns.signatures.push(str.substring(0,40));str="";}else str="";}return JSON.stringify({hex:hex.substring(0,2048),size:u8.length,patterns:patterns,magic:Array.from(u8.slice(0,8)).map(function(b){return b.toString(16)}).join(" ")});}catch(e){return JSON.stringify({error:e.message})}})()`,
-      awaitPromise:true,returnByValue:true,timeout:15000
-    },(hexResult)=>{
-      if(chrome.runtime.lastError||!hexResult?.result?.value)return;
-      try{
-        const d=JSON.parse(hexResult.result.value);
-        w.hexDump=d.hex;w.fullSize=d.size;w.magic=d.magic;w.patterns=d.patterns;
-      }catch(e){console.warn('[PenScope] wasmHex',e);}
-    });
-  });
 }
 
 // v5.4: BroadcastChannel monitoring via CDP
@@ -3252,7 +3886,12 @@ function parseAndStoreSourceMap(tabId,rawBody,mapUrl,source){
     const sm=JSON.parse(rawBody);
     if(!sm.sources)return;
     const sources=(sm.sources||[]).slice(0,1000);
+    // v5.6: capture pre-minification identifiers from the `names` array. These are the real
+    // function/variable names before minification — grep them for admin/auth/etc to surface
+    // hidden functionality that you'd otherwise only see by downloading and reading source.
+    const rawNames=Array.isArray(sm.names)?sm.names.filter(n=>typeof n==="string"&&n.length>1&&n.length<200):[];
     const result={url:mapUrl,source,timestamp:Date.now(),version:sm.version||3,sourceRoot:sm.sourceRoot||"",fileCount:sources.length,files:sources,
+      names:rawNames.slice(0,5000),namesCount:rawNames.length,
       secrets:[],endpoints:[],routes:[],envVars:[],dependencies:[],todos:[],fileTree:{},
       sensitiveFiles:[],sourceContents:{}};
 
@@ -3732,6 +4371,129 @@ function extractHeapSecrets(tabId){
   });
 }
 
+// v5.6: GraphQL operation extractor — passive reconstruction of schema from captured POST bodies.
+// Walks tab.postBodies, finds anything with a "query"/"mutation" field, extracts operation name,
+// type, variables, and selected top-level fields. Aliases get mapped back to real field names.
+// This surfaces a usable schema on every scan of a GraphQL target without needing introspection.
+function extractGraphQLOps(tabId){
+  const tab=T(tabId);
+  const results=tab.graphqlOps||[];
+  // Seed dedup set from existing entries so subsequent runs don't duplicate operations
+  const seenOps=new Set();
+  results.forEach(o=>seenOps.add(o.type+":"+o.name+":"+(o.fields||[]).slice(0,5).join(",")));
+  function parseQueryString(q){
+    if(!q||typeof q!=="string")return null;
+    const typeMatch=q.match(/\b(query|mutation|subscription)\b/i);
+    const type=typeMatch?typeMatch[1].toLowerCase():"query";
+    const nameMatch=q.match(/(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)/i);
+    const name=nameMatch?nameMatch[1]:"(anonymous)";
+    // Find first top-level selection set {...}
+    const openIdx=q.indexOf("{");
+    const fields=[];
+    const fragments=[];
+    if(openIdx>-1){
+      // Collect field names at depth 1
+      let depth=0,i=openIdx,curField="",collecting=false;
+      while(i<q.length&&i-openIdx<3000){
+        const ch=q[i];
+        if(ch==="{"){depth++;if(depth===1)collecting=true;}
+        else if(ch==="}"){depth--;if(depth===0)break;}
+        else if(depth===1){
+          if(/[A-Za-z0-9_]/.test(ch))curField+=ch;
+          else if(curField){
+            // Skip parentheses content (arguments)
+            if(ch==="("){
+              let pDepth=1;i++;
+              while(i<q.length&&pDepth>0){if(q[i]==="(")pDepth++;else if(q[i]===")")pDepth--;i++;}
+              i--;
+            }
+            if(curField&&!fields.includes(curField)&&!/^(on|true|false|null)$/.test(curField))fields.push(curField);
+            curField="";
+          }
+        }
+        i++;
+      }
+      if(curField&&!fields.includes(curField))fields.push(curField);
+    }
+    // Fragment extraction
+    const fragRe=/\.{3}\s*([A-Za-z_][A-Za-z0-9_]*)/g;
+    let fm;while((fm=fragRe.exec(q))!==null){if(!fragments.includes(fm[1]))fragments.push(fm[1]);}
+    // Named fragment definitions
+    const fragDefRe=/fragment\s+([A-Za-z_][A-Za-z0-9_]*)\s+on\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+    const fragDefs=[];
+    let fdm;while((fdm=fragDefRe.exec(q))!==null)fragDefs.push({name:fdm[1],onType:fdm[2]});
+    return{type,name,fields:fields.slice(0,30),fragments:fragments.slice(0,20),fragDefs};
+  }
+  (tab.postBodies||[]).forEach(p=>{
+    if(!p.body||p.body.length<10)return;
+    const body=p.body.trim();
+    if(body.charAt(0)!=="{"&&body.charAt(0)!=="[")return;
+    let obj;try{obj=JSON.parse(body);}catch{return;}
+    const batch=Array.isArray(obj)?obj:[obj];
+    batch.forEach(op=>{
+      if(!op||typeof op!=="object")return;
+      const query=op.query||op.mutation;
+      if(!query||typeof query!=="string")return;
+      const parsed=parseQueryString(query);
+      if(!parsed)return;
+      const key=parsed.type+":"+parsed.name+":"+parsed.fields.slice(0,5).join(",");
+      if(seenOps.has(key))return;seenOps.add(key);
+      const varNames=op.variables&&typeof op.variables==="object"?Object.keys(op.variables).slice(0,20):[];
+      const varSample={};
+      varNames.forEach(vn=>{
+        try{const v=op.variables[vn];varSample[vn]=typeof v==="object"?JSON.stringify(v).substring(0,60):String(v).substring(0,60);}catch{}
+      });
+      results.push({
+        name:parsed.name,
+        type:parsed.type,
+        fields:parsed.fields,
+        fragments:parsed.fragments,
+        fragDefs:parsed.fragDefs,
+        variables:varNames,
+        variableSample:varSample,
+        url:p.url||"",
+        path:p.path||"",
+        contentType:p.contentType||"",
+        queryPreview:query.substring(0,600).replace(/\s+/g," ").trim(),
+        timestamp:p.timestamp||Date.now()
+      });
+    });
+  });
+  tab.graphqlOps=results;
+}
+
+// v5.6: Symbol table aggregator — collects pre-minification identifiers from every parsed source
+// map's `names` array and flags the interesting ones (admin/auth/token/etc). This reveals the
+// real function/variable names the frontend uses, which is gold for reverse-engineering minified
+// bundles. Runs after source maps are parsed (either passively or by the probe).
+function buildSymbolTable(tabId){
+  const tab=T(tabId);
+  const allNames=new Set();
+  const byFile={};
+  (tab.parsedSourceMaps||[]).forEach(sm=>{
+    (sm.names||[]).forEach(n=>{
+      if(!n||typeof n!=="string"||n.length<2||n.length>120)return;
+      allNames.add(n);
+      const file=(sm.url||"").split("/").pop()||"?";
+      if(!byFile[file])byFile[file]=new Set();
+      byFile[file].add(n);
+    });
+  });
+  if(!allNames.size){tab.symbolTable=[];return;}
+  const nameList=[...allNames];
+  const interestRe=/^(?:.{0,30}(?:admin|auth|login|logout|session|token|jwt|secret|password|passwd|credent|priv(?:ate|ileg)|intern|debug|hidden|bypass|sudo|root|impersonat|permission|role|authz|apikey|api_key|backdoor|shadow|system|kernel|master|owner|superuser|mfa|2fa|otp|oauth|saml|sso|cert|key|vault|feature_?flag|kill_?switch|telemetry|metric))/i;
+  const interesting=nameList.filter(n=>interestRe.test(n)).slice(0,300);
+  const byFileObj={};
+  Object.keys(byFile).slice(0,20).forEach(f=>{byFileObj[f]=[...byFile[f]].slice(0,100);});
+  tab.symbolTable=[{
+    total:allNames.size,
+    interestingCount:interesting.length,
+    interesting,
+    sample:nameList.slice(0,500),
+    byFile:byFileObj
+  }];
+}
+
 // Run all passive analysis
 function runPassiveAnalysis(tabId){
   const tab=T(tabId);
@@ -3739,7 +4501,8 @@ function runPassiveAnalysis(tabId){
   classifyAndFilterRoutes(tabId);
   buildPermissionMatrix(tabId);
   generateIDORTests(tabId);
-  // IndexedDB + CacheStorage + deep upgrades — only need to run once (async CDP calls)
+  extractGraphQLOps(tabId);
+  buildSymbolTable(tabId);
   if(_debugTabs.has(tabId)&&!tab._passiveExtracted){
     tab._passiveExtracted=true;
     extractIndexedDB(tabId);
@@ -3749,7 +4512,6 @@ function runPassiveAnalysis(tabId){
     extractHttpOnlyCookies(tabId);
     extractHeapSecrets(tabId);
   }
-  // Response schemas from already-captured API bodies (no CDP needed)
   if(!tab._schemasExtracted&&tab.apiResponseBodies.length>0){
     tab._schemasExtracted=true;
     extractResponseSchemas(tabId);
@@ -3759,7 +4521,7 @@ function runPassiveAnalysis(tabId){
 // -------------------------------------------------------
 // 4. TAB LIFECYCLE
 // -------------------------------------------------------
-chrome.tabs.onRemoved.addListener(tabId=>{if(_debugTabs.has(tabId)){try{chrome.debugger.detach({tabId});}catch(e){console.warn('[PenScope] detach on remove',e.message||e);}_debugTabs.delete(tabId);}delete state[tabId];delete _scripts[tabId];Object.keys(_seen).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _seen[k];});Object.keys(_pending).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _pending[k];});});
+chrome.tabs.onRemoved.addListener(tabId=>{if(_debugTabs.has(tabId)){try{chrome.debugger.detach({tabId});}catch(e){console.warn('[PenScope] detach on remove',e.message||e);}_debugTabs.delete(tabId);}delete state[tabId];delete _scripts[tabId];Object.keys(_seen).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _seen[k];});Object.keys(_pending).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _pending[k];});try{chrome.storage.session.remove(`ps:tab:${tabId}`);}catch(e){}});
 chrome.tabs.onUpdated.addListener((tabId,changeInfo)=>{if(changeInfo.status==="loading"&&changeInfo.url){const wasDeep=state[tabId]?.deepEnabled;delete state[tabId];if(_scripts[tabId])_scripts[tabId]=new Map();Object.keys(_seen).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _seen[k];});Object.keys(_pending).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _pending[k];});const t=T(tabId);t.url=changeInfo.url;t.deepEnabled=wasDeep;}if(changeInfo.url&&state[tabId])state[tabId].url=changeInfo.url;
   // v5: Trigger script extraction after page finishes loading
   if(changeInfo.status==="complete"&&_debugTabs.has(tabId)){
@@ -3773,7 +4535,7 @@ chrome.tabs.onUpdated.addListener((tabId,changeInfo)=>{if(changeInfo.status==="l
 // -------------------------------------------------------
 chrome.runtime.onMessage.addListener((msg,sender,sendResponse)=>{
   switch(msg.action){
-    case "getData":{const d=T(msg.tabId);const meta={};for(const[k,v]of Object.entries(d.endpointMeta))meta[k]={statuses:[...(v.statuses||[])],sizes:v.sizes||[],queries:[...(v.queries||[])]};
+    case "getData":{const d=T(msg.tabId);markDirty(msg.tabId);const meta={};for(const[k,v]of Object.entries(d.endpointMeta))meta[k]={statuses:[...(v.statuses||[])],sizes:v.sizes||[],queries:[...(v.queries||[])]};
       // v4: Generate method suggestions on the fly
       const methodSuggestions=[];
       d.endpoints.filter(e=>/\/api\//i.test(e.path)&&e.method==="GET").forEach(ep=>{
@@ -3789,7 +4551,7 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse)=>{
       if(_debugTabs.has(msg.tabId)&&(!d.runtime||!d.runtime.framework)&&!d.runtime?.interestingGlobals?.length)runRuntimeExtraction(msg.tabId);
       // v5.2: Run all passive analysis
       runPassiveAnalysis(msg.tabId);
-      sendResponse({...d,params:Object.values(d.params),endpointMeta:meta,deepEnabled:_debugTabs.has(msg.tabId),methodSuggestions,runtime:d.runtime||{},interceptedRequests:(d.interceptedRequests||[]).slice(-100),networkTiming:d.networkTiming||{},scriptSources:d.scriptSources||[],consoleLogs:d.consoleLogs||[],auditIssues:d.auditIssues||[],executionContexts:d.executionContexts||[],discoveredRoutes:d.discoveredRoutes||[],probeData:d.probeData||null,indexedDBData:d.indexedDBData||[],cacheStorageData:d.cacheStorageData||[],jwtFindings:d.jwtFindings||[],permissionMatrix:d.permissionMatrix||[],idorTests:d.idorTests||[],postBodies:d.postBodies||[],apiResponseBodies:d.apiResponseBodies||[],coverageData:d.coverageData||null,domListeners:d.domListeners||[],shadowDOMData:d.shadowDOMData||[],memoryStrings:d.memoryStrings||[],encodedBlobs:d.encodedBlobs||[],dnsPrefetch:d.dnsPrefetch||[],iframeScan:d.iframeScan||[],headerIntel:d.headerIntel||[],perfEntries:d.perfEntries||[],cssContent:d.cssContent||[],harvestedMaps:d.harvestedMaps||[],realEventListeners:d.realEventListeners||[],httpOnlyCookies:d.httpOnlyCookies||[],responseSchemas:d.responseSchemas||[],heapSecrets:d.heapSecrets||[],parsedSourceMaps:d.parsedSourceMaps||[],grpcEndpoints:d.grpcEndpoints||[],wasmModules:d.wasmModules||[],webrtcLeaks:d.webrtcLeaks||[],broadcastChannels:d.broadcastChannels||[],webAuthnInfo:d.webAuthnInfo||null,compressionResults:d.compressionResults||[],grpcReflection:d.grpcReflection||null,wsHijackResults:d.wsHijackResults||[],cachePoisonProbe:d.cachePoisonProbe||[],timingOracle:d.timingOracle||[],coopCoepInfo:d.coopCoepInfo||null,storagePartition:d.storagePartition||[],webgpuInfo:d.webgpuInfo||null});return true;}
+      sendResponse({...d,params:Object.values(d.params),endpointMeta:meta,deepEnabled:_debugTabs.has(msg.tabId),methodSuggestions,runtime:d.runtime||{},interceptedRequests:(d.interceptedRequests||[]).slice(-100),networkTiming:d.networkTiming||{},scriptSources:d.scriptSources||[],consoleLogs:d.consoleLogs||[],auditIssues:d.auditIssues||[],executionContexts:d.executionContexts||[],discoveredRoutes:d.discoveredRoutes||[],probeData:d.probeData||null,indexedDBData:d.indexedDBData||[],cacheStorageData:d.cacheStorageData||[],jwtFindings:d.jwtFindings||[],permissionMatrix:d.permissionMatrix||[],idorTests:d.idorTests||[],postBodies:d.postBodies||[],apiResponseBodies:d.apiResponseBodies||[],coverageData:d.coverageData||null,domListeners:d.domListeners||[],shadowDOMData:d.shadowDOMData||[],memoryStrings:d.memoryStrings||[],encodedBlobs:d.encodedBlobs||[],dnsPrefetch:d.dnsPrefetch||[],iframeScan:d.iframeScan||[],headerIntel:d.headerIntel||[],perfEntries:d.perfEntries||[],cssContent:d.cssContent||[],harvestedMaps:d.harvestedMaps||[],realEventListeners:d.realEventListeners||[],httpOnlyCookies:d.httpOnlyCookies||[],responseSchemas:d.responseSchemas||[],heapSecrets:d.heapSecrets||[],parsedSourceMaps:d.parsedSourceMaps||[],grpcEndpoints:d.grpcEndpoints||[],wasmModules:d.wasmModules||[],webrtcLeaks:d.webrtcLeaks||[],broadcastChannels:d.broadcastChannels||[],webAuthnInfo:d.webAuthnInfo||null,compressionResults:d.compressionResults||[],grpcReflection:d.grpcReflection||null,wsHijackResults:d.wsHijackResults||[],cachePoisonProbe:d.cachePoisonProbe||[],timingOracle:d.timingOracle||[],coopCoepInfo:d.coopCoepInfo||null,storagePartition:d.storagePartition||[],webgpuInfo:d.webgpuInfo||null,graphqlOps:d.graphqlOps||[],symbolTable:d.symbolTable||[]});return true;}
     case "clearData":{const wasDeep=_debugTabs.has(msg.tabId);delete state[msg.tabId];if(_scripts[msg.tabId])_scripts[msg.tabId]=new Map();Object.keys(_seen).forEach(k=>{if(k.startsWith(`${msg.tabId}:`))delete _seen[k];});Object.keys(_pending).forEach(k=>{if(k.startsWith(`${msg.tabId}:`))delete _pending[k];});if(wasDeep)T(msg.tabId).deepEnabled=true;sendResponse({ok:true});return true;}
     case "reportContentScan":{const tabId=sender.tab?.id;if(tabId){const t=T(tabId);
       // Standard fields
@@ -3814,7 +4576,7 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse)=>{
     case "disableDeep":{detachDebugger(msg.tabId).then(()=>sendResponse({ok:true}));return true;}
     case "startProbe":{
       if(!_debugTabs.has(msg.tabId)){sendResponse({ok:false,error:"Deep mode required"});return true;}
-      runProbe(msg.tabId,msg.aggroLevel||"medium").then(r=>{
+      runProbe(msg.tabId,msg.aggroLevel||"medium",msg.customHeaders||{},msg.recursive!==false,msg.stealth===true).then(r=>{
         sendResponse({ok:r.status==="done",results:r,error:r.status==="error"?r.error:null});
       }).catch(e=>sendResponse({ok:false,error:e.message}));
       return true;}
@@ -3926,6 +4688,118 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse)=>{
         });
       });
       });// close chrome.tabs.get
+      return true;}
+    // v5.8: HAR import — ingest a Burp/ZAP/DevTools capture and populate state as if the traffic
+    // had been captured live. Useful for post-hoc analysis without opening the target, sharing
+    // scans between team members, or replaying captures from tools that intercept better than
+    // the browser's own fetch layer.
+    case "importHar":{
+      const t=T(msg.tabId);
+      const entries=msg.entries||[];
+      let imported=0,newEps=0,newParams=0,newAuth=0,newBodies=0,newFindings=0;
+      entries.forEach(ent=>{
+        try{
+          const req=ent.request;const resp=ent.response;
+          if(!req||!resp)return;
+          const url=req.url||"";
+          if(!url||!url.startsWith("http"))return;
+          let u;try{u=new URL(url);}catch{return;}
+          if(u.protocol==="chrome-extension:"||u.protocol==="data:")return;
+          imported++;
+          if(!t.url)t.url=url;
+          const method=(req.method||"GET").toUpperCase();
+          const path=u.pathname;
+          const epKey=`${method}:${u.hostname}:${path}`;
+          const tags=tagEndpoint(path);
+          if(!seen(msg.tabId,"ep",epKey)){
+            const ep={method,url,path,host:u.hostname,query:u.search,type:resp.content?.mimeType?.includes("html")?"main_frame":"xmlhttprequest",timestamp:Date.parse(ent.startedDateTime)||Date.now(),initiator:"har-import",tags,status:resp.status||null,responseSize:resp.content?.size||resp.bodySize||null};
+            t.endpoints.push(ep);
+            t.endpointIndex.set(url,ep);
+            newEps++;
+          }
+          // Query params
+          u.searchParams.forEach((val,key)=>{
+            const pk=`q:${path}:${key}`;
+            if(!t.params[pk]){t.params[pk]={path,param:key,example:val.substring(0,100),source:"query",method};newParams++;}
+          });
+          // Request headers — auth extraction
+          if(req.headers){
+            const authHdrs=[];
+            req.headers.forEach(h=>{
+              if(!h.name||!h.value)return;
+              if(AUTH_HDRS.includes(h.name.toLowerCase()))authHdrs.push({name:h.name,value:h.value.substring(0,500)});
+            });
+            if(authHdrs.length){
+              const hKey=authHdrs.map(h=>`${h.name}:${h.value.substring(0,20)}`).join("|");
+              if(!seen(msg.tabId,"rqh",hKey)){t.requestHeaders.push({url,method,headers:authHdrs,timestamp:Date.now()});newAuth++;}
+            }
+          }
+          // POST bodies
+          if(req.postData&&req.postData.text&&["POST","PUT","PATCH","DELETE"].includes(method)){
+            const body=req.postData.text.substring(0,CONFIG.MAX_POST_BODY);
+            const pKey=`pb:${method}:${path}`;
+            if(!seen(msg.tabId,"pb",pKey)&&t.postBodies.length<CONFIG.MAX_POST_BODIES){
+              t.postBodies.push({method,url,path,contentType:req.postData.mimeType||"",body,timestamp:Date.now()});
+              newBodies++;
+              // JSON body param extraction
+              try{
+                if((req.postData.mimeType||"").includes("json")||body.charAt(0)==="{"||body.charAt(0)==="["){
+                  const obj=JSON.parse(body);
+                  const extract=(o,prefix="")=>{
+                    if(typeof o!=="object"||!o)return;
+                    for(const[k,v] of Object.entries(o)){
+                      const pk=`jb:${path}:${prefix}${k}`;
+                      if(!t.params[pk]){t.params[pk]={path,param:prefix?`${prefix}${k}`:k,example:String(v).substring(0,100),source:"json-body",method};newParams++;}
+                    }
+                  };
+                  extract(obj);
+                }
+              }catch{}
+            }
+          }
+          // Response body scanning — rich findings pipeline
+          if(resp.content&&resp.content.text&&resp.content.size<500000){
+            const body=resp.content.text;
+            const meta={url,status:resp.status,mimeType:resp.content.mimeType||""};
+            try{scanResponseBody(msg.tabId,meta,body.substring(0,50000));}catch(e){}
+            // API response deep scan
+            const isJSON=(resp.content.mimeType||"").includes("json");
+            const isAPI=/\/api\//i.test(path);
+            if((isJSON||isAPI)&&body.length>10){
+              const rbKey=`arb:${path}`;
+              if(!seen(msg.tabId,"arb",rbKey)&&t.apiResponseBodies.length<100){
+                const findings=deepScanBody(body,url);
+                if(findings.length)newFindings+=findings.length;
+                t.apiResponseBodies.push({url,path,status:resp.status,size:body.length,contentType:resp.content.mimeType,bodyPreview:body.substring(0,500),findings,timestamp:Date.now()});
+              }
+            }
+            // JS files — run endpoint + secret grep
+            if((resp.content.mimeType||"").includes("javascript")||url.endsWith(".js")){
+              try{scanScriptViaNetwork(msg.tabId,body,url);}catch(e){}
+            }
+          }
+          // Response headers — detect auth/cookie/CSP issues
+          if(resp.headers&&resp.status&&(resp.content?.mimeType||"").includes("html")){
+            try{
+              const hdrs={};const leaks=[];
+              resp.headers.forEach(h=>{
+                const n=h.name.toLowerCase();
+                hdrs[n]=h.value;
+                if(LEAK_HEADERS.includes(n))leaks.push({name:h.name,value:h.value});
+              });
+              const missing=[];
+              for(const[header,info] of Object.entries(SEC_HEADERS))if(!hdrs[header])missing.push({header,severity:info.sev,desc:info.desc});
+              let cspAnalysis=null;
+              if(hdrs["content-security-policy"])cspAnalysis=analyzeCSP(hdrs["content-security-policy"]);
+              const entry={url,type:"main_frame",missing,leaks,corsIssues:[],cookieIssues:[],cspAnalysis,raw:hdrs,timestamp:Date.now()};
+              const idx=t.headers.findIndex(h=>h.type==="main_frame");
+              if(idx<0)t.headers.push(entry);
+            }catch(e){}
+          }
+        }catch(e){}
+      });
+      markDirty(msg.tabId);
+      sendResponse({ok:true,imported,endpoints:newEps,params:newParams,authHeaders:newAuth,postBodies:newBodies,findings:newFindings});
       return true;}
     case "downloadSourceMap":{
       // Fetch a single .map file content from page context

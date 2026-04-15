@@ -1,9 +1,10 @@
-// PenScope v5 — Content Script
-// MAXED patterns + 11 NEW contextual scanners:
+// PenScope v5.8 — Content Script
+// 60+ secret patterns, 80+ tech fingerprints, 11 contextual scanners:
 //   Path param extraction, mixed content, SRI check,
 //   postMessage listeners, dependency versions, web workers,
 //   DOM XSS sinks, JSONP detection, cookie value scan,
-//   recon file suggestions, HTTP method suggestions
+//   recon file suggestions, HTTP method suggestions,
+//   WebAuthn/FIDO2, WebRTC leaks, WASM modules, COOP/COEP
 (() => {
 
 // ============================================================
