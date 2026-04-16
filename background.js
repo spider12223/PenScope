@@ -1300,12 +1300,13 @@ function extractUrlsFromBody(body){
   if(!body||typeof body!=="string"||body.length<10)return [];
   var urls={};
   var count=0;
-  var pathRe=/["'\`](\/(?:api|v\d+|graphql|gql|rest|admin|internal|app|auth|user|account|public)\/[a-zA-Z0-9_\-\/.{}:?=&,%~]+)["'\`]/g;
+  var pathRe=new RegExp("[\"'](\\/(?:api|v\\d+|graphql|gql|rest|admin|internal|app|auth|user|account|public)\\/[a-zA-Z0-9_\\-\\/.{}:?=&,%~]+)[\"']","g");
+  var assetRe=new RegExp("\\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|pdf|mp4|mp3|webp)(?:\\?|$)","i");
   var m;
   while((m=pathRe.exec(body))!==null&&count<80){
     var p=m[1];
     if(p.length<=4||p.length>=250)continue;
-    if(/\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|pdf|mp4|mp3|webp)(?:\?|$)/i.test(p))continue;
+    if(assetRe.test(p))continue;
     var hashIdx=p.indexOf("#");
     if(hashIdx>-1)p=p.substring(0,hashIdx);
     if(!urls[p]){urls[p]=1;count++;}
@@ -1318,27 +1319,29 @@ function extractUrlsFromBody(body){
 function scanBodyForFindings(body){
   if(!body||typeof body!=="string"||body.length<10)return [];
   var findings=[];
+  // All regex MUST use new RegExp() with double-escaped backslashes because this code runs
+  // inside a template literal that strips single backslashes (\d→d, \s→s, \?→? etc).
   var patterns=[
-    {n:"Auth Token",re:/"(?:access_token|refresh_token|bearer|jwt|session_token|id_token|auth_token)"\s*:\s*"([^"]{10,})"/gi,sev:"critical"},
-    {n:"API Key",re:/"(?:api_key|apiKey|api_secret|client_secret|secret_key|privateKey|private_key)"\s*:\s*"([^"]{8,})"/gi,sev:"critical"},
-    {n:"Password",re:/"(?:password|passwd|pwd|pass_hash|password_hash)"\s*:\s*"([^"]{1,})"/gi,sev:"critical"},
-    {n:"Internal ID",re:/"(?:user_id|userId|account_id|accountId|internal_id|employee_id|admin_id)"\s*:\s*"?([^",}\]\s]{1,80})/gi,sev:"medium"},
-    {n:"Email",re:/"(?:email|mail|user_email|emailAddress)"\s*:\s*"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"/gi,sev:"low"},
-    {n:"Phone",re:/"(?:phone|mobile|phone_number|phoneNumber|tel)"\s*:\s*"?(\+?[\d\s()-]{7,20})/gi,sev:"medium"},
-    {n:"Internal URL",re:/"(?:url|endpoint|internal_url|host|backend_url|service_url)"\s*:\s*"(https?:\/\/(?:10\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.|localhost|127\.0\.)[^"]+)"/gi,sev:"high"},
-    {n:"AWS Resource",re:/arn:aws:[a-z0-9-]+:[a-z0-9-]*:\d{12}:[a-zA-Z0-9\/_.-]{5,}/g,sev:"high"},
-    {n:"Private Key",re:/-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----/g,sev:"critical"},
-    {n:"Hardcoded Stripe",re:/(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}/g,sev:"critical"},
-    {n:"Hardcoded GitHub",re:/gh[ps]_[A-Za-z0-9]{36,}/g,sev:"critical"},
-    {n:"Hardcoded JWT",re:/eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}/g,sev:"high"},
-    {n:"AWS Access Key",re:/AKIA[0-9A-Z]{16}/g,sev:"critical"},
-    {n:"Google API Key",re:/AIza[A-Za-z0-9_-]{35}/g,sev:"high"},
-    {n:"Credit Card",re:/\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{1,4}\b/g,sev:"critical"},
-    {n:"SSN Pattern",re:/\b\d{3}-\d{2}-\d{4}\b/g,sev:"critical"},
-    {n:"Stack Trace",re:/at\s+[\w$.]+\s*\([^)]*:\d+(?::\d+)?\)/g,sev:"medium"},
-    {n:"SQL Error",re:/(?:SQLSTATE|mysql_|pg_|ORA-\d{5}|syntax error.*SQL|near ".*": syntax)/gi,sev:"high"},
-    {n:"Admin Flag",re:/"(?:is_admin|isAdmin|is_superuser|is_staff)"\s*:\s*(true|1)/gi,sev:"high"},
-    {n:"Role/Scope",re:/"(?:role|roles|scope|scopes|permissions|groups)"\s*:\s*"?\[?([^",\}\]]{1,120})/gi,sev:"medium"}
+    {n:"Auth Token",re:new RegExp('"(?:access_token|refresh_token|bearer|jwt|session_token|id_token|auth_token)"\\s*:\\s*"([^"]{10,})"',"gi"),sev:"critical"},
+    {n:"API Key",re:new RegExp('"(?:api_key|apiKey|api_secret|client_secret|secret_key|privateKey|private_key)"\\s*:\\s*"([^"]{8,})"',"gi"),sev:"critical"},
+    {n:"Password",re:new RegExp('"(?:password|passwd|pwd|pass_hash|password_hash)"\\s*:\\s*"([^"]{1,})"',"gi"),sev:"critical"},
+    {n:"Internal ID",re:new RegExp('"(?:user_id|userId|account_id|accountId|internal_id|employee_id|admin_id)"\\s*:\\s*"?([^",}\\]\\s]{1,80})',"gi"),sev:"medium"},
+    {n:"Email",re:new RegExp('"(?:email|mail|user_email|emailAddress)"\\s*:\\s*"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})"',"gi"),sev:"low"},
+    {n:"Phone",re:new RegExp('"(?:phone|mobile|phone_number|phoneNumber|tel)"\\s*:\\s*"?(\\+?[\\d\\s()-]{7,20})',"gi"),sev:"medium"},
+    {n:"Internal URL",re:new RegExp('"(?:url|endpoint|internal_url|host|backend_url|service_url)"\\s*:\\s*"(https?:\\/\\/(?:10\\.|172\\.(?:1[6-9]|2\\d|3[01])\\.|192\\.168\\.|localhost|127\\.0\\.)[^"]+)"',"gi"),sev:"high"},
+    {n:"AWS Resource",re:new RegExp("arn:aws:[a-z0-9-]+:[a-z0-9-]*:\\d{12}:[a-zA-Z0-9/_.-]{5,}","g"),sev:"high"},
+    {n:"Private Key",re:new RegExp("-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----","g"),sev:"critical"},
+    {n:"Hardcoded Stripe",re:new RegExp("(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}","g"),sev:"critical"},
+    {n:"Hardcoded GitHub",re:new RegExp("gh[ps]_[A-Za-z0-9]{36,}","g"),sev:"critical"},
+    {n:"Hardcoded JWT",re:new RegExp("eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}","g"),sev:"high"},
+    {n:"AWS Access Key",re:new RegExp("AKIA[0-9A-Z]{16}","g"),sev:"critical"},
+    {n:"Google API Key",re:new RegExp("AIza[A-Za-z0-9_-]{35}","g"),sev:"high"},
+    {n:"Credit Card",re:new RegExp("\\b(?:4\\d{3}|5[1-5]\\d{2}|3[47]\\d{2}|6(?:011|5\\d{2}))[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{1,4}\\b","g"),sev:"critical"},
+    {n:"SSN Pattern",re:new RegExp("\\b\\d{3}-\\d{2}-\\d{4}\\b","g"),sev:"critical"},
+    {n:"Stack Trace",re:new RegExp("at\\s+[\\w$.]+\\s*\\([^)]*:\\d+(?::\\d+)?\\)","g"),sev:"medium"},
+    {n:"SQL Error",re:new RegExp("(?:SQLSTATE|mysql_|pg_|ORA-\\d{5}|syntax error.*SQL|near \".*\": syntax)","gi"),sev:"high"},
+    {n:"Admin Flag",re:new RegExp('"(?:is_admin|isAdmin|is_superuser|is_staff)"\\s*:\\s*(true|1)',"gi"),sev:"high"},
+    {n:"Role/Scope",re:new RegExp('"(?:role|roles|scope|scopes|permissions|groups)"\\s*:\\s*"?\\[?([^",}\\]]{1,120})',"gi"),sev:"medium"}
   ];
   patterns.forEach(function(p){
     p.re.lastIndex=0;
@@ -2261,17 +2264,22 @@ if(ctx.recursive!==false){
   var observedPaths={};
   (ctx.observedApis||[]).forEach(function(e){observedPaths[e.path]=1;});
   (ctx.allEndpoints||[]).forEach(function(e){observedPaths[e.path]=1;});
-  var staticAssetRe=/\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|pdf|mp4|mp3|webp|wasm)(?:\?|$)/i;
-  var destructiveRe=/\/(?:delete|remove|destroy|purge|drop|revoke|ban|deactivate|unsubscribe|cancel|uninstall|wipe)(?:\/|$|\?)/i;
+  // All regex inside this template literal MUST use new RegExp() with double-escaped backslashes.
+  // Regex literals like /\d+/ get their backslashes stripped by the outer template (\d → d).
+  var staticAssetRe=new RegExp("\\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|pdf|mp4|mp3|webp|wasm)(?:\\?|$)","i");
+  var destructiveRe=new RegExp("\\/(?:delete|remove|destroy|purge|drop|revoke|ban|deactivate|unsubscribe|cancel|uninstall|wipe)(?:\\/|$|\\?)","i");
+  var templateRe=new RegExp("\\{[^}]+\\}");
   function shouldProbe(path){
     if(!path||typeof path!=="string"||path.length<3||path.length>250)return false;
     if(path.charAt(0)!=="/")return false;
     if(observedPaths[path])return false;
     if(staticAssetRe.test(path))return false;
-    // Skip templated paths — we can't guess placeholder values
-    if(/\{[^}]+\}/.test(path))return false;
-    if(/:[a-zA-Z_]/.test(path.replace(/^(?:https?:)?\/\/[^/]+/,"").replace(/^[^?]*\?/,""))&&path.indexOf(":")>-1&&path.indexOf(":")<path.length-1)return false;
-    // Destructive endpoints gated on aggroLevel
+    if(templateRe.test(path))return false;
+    if(path.indexOf(":")>0&&path.indexOf("://")===-1){
+      var stripped=path.split("?")[0];
+      var segs=stripped.split("/");
+      for(var si=0;si<segs.length;si++){if(segs[si].charAt(0)===":"&&segs[si].length>1)return false;}
+    }
     if(destructiveRe.test(path)&&ctx.aggroLevel!=="full")return false;
     return true;
   }
@@ -2613,7 +2621,7 @@ if(ctx.aggroLevel!=="careful"){
 R.errors.push("STEP 35: API Version Downgrade");
 R.versionDowngrade=[];
 if(ctx.aggroLevel!=="careful"){
-  var versionRe=/\/v(\d+)\//;
+  var versionRe=new RegExp("\\/v(\\d+)\\/");
   var versioned=ctx.observedApis.filter(function(e){return versionRe.test(e.path);}).slice(0,8);
   for(var vdi=0;vdi<versioned.length;vdi++){
     var vEp=versioned[vdi];
