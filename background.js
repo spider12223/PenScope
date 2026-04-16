@@ -1224,7 +1224,40 @@ async function runProbe(tabId,aggroLevel,customHeaders,recursive,stealth){
     // v5.7: smart recursive API discovery toggle
     recursive:recursive!==false,
     // v5.8: stealth mode — jitter + random pauses to evade WAFs
-    stealth:stealth===true
+    stealth:stealth===true,
+    // v5.9.2: Regex patterns injected via ctx so JSON.stringify preserves backslashes
+    // perfectly through the template-literal → eval → string-parser → RegExp chain.
+    // Defined here (module scope) and reconstructed in the probe eval as new RegExp(p.src, p.f).
+    _re:{
+      staticAsset:{src:"\\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|pdf|mp4|mp3|webp|wasm)(?:\\?|$)",f:"i"},
+      destructive:{src:"\\/(?:delete|remove|destroy|purge|drop|revoke|ban|deactivate|unsubscribe|cancel|uninstall|wipe)(?:\\/|$|\\?)",f:"i"},
+      template:{src:"\\{[^}]+\\}",f:""},
+      pathExtract:{src:"[\"'](\\/(?:api|v\\d+|graphql|gql|rest|admin|internal|app|auth|user|account|public)\\/[a-zA-Z0-9_\\-\\/.{}:?=&,%~]+)[\"']",f:"g"},
+      assetFilter:{src:"\\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|pdf|mp4|mp3|webp)(?:\\?|$)",f:"i"},
+      version:{src:"\\/v(\\d+)\\/",f:""},
+      bodyPatterns:[
+        {n:"Auth Token",src:"\"(?:access_token|refresh_token|bearer|jwt|session_token|id_token|auth_token)\"\\s*:\\s*\"([^\"]{10,})\"",f:"gi",sev:"critical"},
+        {n:"API Key",src:"\"(?:api_key|apiKey|api_secret|client_secret|secret_key|privateKey|private_key)\"\\s*:\\s*\"([^\"]{8,})\"",f:"gi",sev:"critical"},
+        {n:"Password",src:"\"(?:password|passwd|pwd|pass_hash|password_hash)\"\\s*:\\s*\"([^\"]{1,})\"",f:"gi",sev:"critical"},
+        {n:"Internal ID",src:"\"(?:user_id|userId|account_id|accountId|internal_id|employee_id|admin_id)\"\\s*:\\s*\"?([^\",}\\]\\s]{1,80})",f:"gi",sev:"medium"},
+        {n:"Email",src:"\"(?:email|mail|user_email|emailAddress)\"\\s*:\\s*\"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})\"",f:"gi",sev:"low"},
+        {n:"Phone",src:"\"(?:phone|mobile|phone_number|phoneNumber|tel)\"\\s*:\\s*\"?(\\+?[\\d\\s()-]{7,20})",f:"gi",sev:"medium"},
+        {n:"Internal URL",src:"\"(?:url|endpoint|internal_url|host|backend_url|service_url)\"\\s*:\\s*\"(https?:\\/\\/(?:10\\.|172\\.(?:1[6-9]|2\\d|3[01])\\.|192\\.168\\.|localhost|127\\.0\\.)[^\"]+)\"",f:"gi",sev:"high"},
+        {n:"AWS Resource",src:"arn:aws:[a-z0-9-]+:[a-z0-9-]*:\\d{12}:[a-zA-Z0-9/_.-]{5,}",f:"g",sev:"high"},
+        {n:"Private Key",src:"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----",f:"g",sev:"critical"},
+        {n:"Hardcoded Stripe",src:"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}",f:"g",sev:"critical"},
+        {n:"Hardcoded GitHub",src:"gh[ps]_[A-Za-z0-9]{36,}",f:"g",sev:"critical"},
+        {n:"Hardcoded JWT",src:"eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}",f:"g",sev:"high"},
+        {n:"AWS Access Key",src:"AKIA[0-9A-Z]{16}",f:"g",sev:"critical"},
+        {n:"Google API Key",src:"AIza[A-Za-z0-9_-]{35}",f:"g",sev:"high"},
+        {n:"Credit Card",src:"\\b(?:4\\d{3}|5[1-5]\\d{2}|3[47]\\d{2}|6(?:011|5\\d{2}))[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{1,4}\\b",f:"g",sev:"critical"},
+        {n:"SSN Pattern",src:"\\b\\d{3}-\\d{2}-\\d{4}\\b",f:"g",sev:"critical"},
+        {n:"Stack Trace",src:"at\\s+[\\w$.]+\\s*\\([^)]*:\\d+(?::\\d+)?\\)",f:"g",sev:"medium"},
+        {n:"SQL Error",src:"(?:SQLSTATE|mysql_|pg_|ORA-\\d{5}|syntax error.*SQL|near \".*\": syntax)",f:"gi",sev:"high"},
+        {n:"Admin Flag",src:"\"(?:is_admin|isAdmin|is_superuser|is_staff)\"\\s*:\\s*(true|1)",f:"gi",sev:"high"},
+        {n:"Role/Scope",src:"\"(?:role|roles|scope|scopes|permissions|groups)\"\\s*:\\s*\"?\\[?([^\",}\\]]{1,120})",f:"gi",sev:"medium"}
+      ]
+    }
   };
   // === Build the eval script — runs in page context with cookies ===
   // ctx is injected via window.__ps_ctx to avoid ALL template literal escaping issues
@@ -1300,8 +1333,8 @@ function extractUrlsFromBody(body){
   if(!body||typeof body!=="string"||body.length<10)return [];
   var urls={};
   var count=0;
-  var pathRe=new RegExp("[\"'](\\/(?:api|v\\d+|graphql|gql|rest|admin|internal|app|auth|user|account|public)\\/[a-zA-Z0-9_\\-\\/.{}:?=&,%~]+)[\"']","g");
-  var assetRe=new RegExp("\\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|pdf|mp4|mp3|webp)(?:\\?|$)","i");
+  var pathRe=new RegExp(ctx._re.pathExtract.src,ctx._re.pathExtract.f);
+  var assetRe=new RegExp(ctx._re.assetFilter.src,ctx._re.assetFilter.f);
   var m;
   while((m=pathRe.exec(body))!==null&&count<80){
     var p=m[1];
@@ -1319,30 +1352,12 @@ function extractUrlsFromBody(body){
 function scanBodyForFindings(body){
   if(!body||typeof body!=="string"||body.length<10)return [];
   var findings=[];
-  // All regex MUST use new RegExp() with double-escaped backslashes because this code runs
-  // inside a template literal that strips single backslashes (\d→d, \s→s, \?→? etc).
-  var patterns=[
-    {n:"Auth Token",re:new RegExp('"(?:access_token|refresh_token|bearer|jwt|session_token|id_token|auth_token)"\\s*:\\s*"([^"]{10,})"',"gi"),sev:"critical"},
-    {n:"API Key",re:new RegExp('"(?:api_key|apiKey|api_secret|client_secret|secret_key|privateKey|private_key)"\\s*:\\s*"([^"]{8,})"',"gi"),sev:"critical"},
-    {n:"Password",re:new RegExp('"(?:password|passwd|pwd|pass_hash|password_hash)"\\s*:\\s*"([^"]{1,})"',"gi"),sev:"critical"},
-    {n:"Internal ID",re:new RegExp('"(?:user_id|userId|account_id|accountId|internal_id|employee_id|admin_id)"\\s*:\\s*"?([^",}\\]\\s]{1,80})',"gi"),sev:"medium"},
-    {n:"Email",re:new RegExp('"(?:email|mail|user_email|emailAddress)"\\s*:\\s*"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})"',"gi"),sev:"low"},
-    {n:"Phone",re:new RegExp('"(?:phone|mobile|phone_number|phoneNumber|tel)"\\s*:\\s*"?(\\+?[\\d\\s()-]{7,20})',"gi"),sev:"medium"},
-    {n:"Internal URL",re:new RegExp('"(?:url|endpoint|internal_url|host|backend_url|service_url)"\\s*:\\s*"(https?:\\/\\/(?:10\\.|172\\.(?:1[6-9]|2\\d|3[01])\\.|192\\.168\\.|localhost|127\\.0\\.)[^"]+)"',"gi"),sev:"high"},
-    {n:"AWS Resource",re:new RegExp("arn:aws:[a-z0-9-]+:[a-z0-9-]*:\\d{12}:[a-zA-Z0-9/_.-]{5,}","g"),sev:"high"},
-    {n:"Private Key",re:new RegExp("-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----","g"),sev:"critical"},
-    {n:"Hardcoded Stripe",re:new RegExp("(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}","g"),sev:"critical"},
-    {n:"Hardcoded GitHub",re:new RegExp("gh[ps]_[A-Za-z0-9]{36,}","g"),sev:"critical"},
-    {n:"Hardcoded JWT",re:new RegExp("eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}","g"),sev:"high"},
-    {n:"AWS Access Key",re:new RegExp("AKIA[0-9A-Z]{16}","g"),sev:"critical"},
-    {n:"Google API Key",re:new RegExp("AIza[A-Za-z0-9_-]{35}","g"),sev:"high"},
-    {n:"Credit Card",re:new RegExp("\\b(?:4\\d{3}|5[1-5]\\d{2}|3[47]\\d{2}|6(?:011|5\\d{2}))[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{1,4}\\b","g"),sev:"critical"},
-    {n:"SSN Pattern",re:new RegExp("\\b\\d{3}-\\d{2}-\\d{4}\\b","g"),sev:"critical"},
-    {n:"Stack Trace",re:new RegExp("at\\s+[\\w$.]+\\s*\\([^)]*:\\d+(?::\\d+)?\\)","g"),sev:"medium"},
-    {n:"SQL Error",re:new RegExp("(?:SQLSTATE|mysql_|pg_|ORA-\\d{5}|syntax error.*SQL|near \".*\": syntax)","gi"),sev:"high"},
-    {n:"Admin Flag",re:new RegExp('"(?:is_admin|isAdmin|is_superuser|is_staff)"\\s*:\\s*(true|1)',"gi"),sev:"high"},
-    {n:"Role/Scope",re:new RegExp('"(?:role|roles|scope|scopes|permissions|groups)"\\s*:\\s*"?\\[?([^",}\\]]{1,120})',"gi"),sev:"medium"}
-  ];
+  // Patterns are defined in module scope and injected via ctx._re.bodyPatterns as JSON.
+  // JSON.stringify preserves backslashes perfectly through the template→eval→string chain.
+  // We reconstruct RegExp objects here from the serialized {src, f} pairs.
+  var patterns=(ctx._re&&ctx._re.bodyPatterns||[]).map(function(p){
+    return{n:p.n,re:new RegExp(p.src,p.f),sev:p.sev};
+  });
   patterns.forEach(function(p){
     p.re.lastIndex=0;
     var m,cnt=0;
@@ -2264,11 +2279,11 @@ if(ctx.recursive!==false){
   var observedPaths={};
   (ctx.observedApis||[]).forEach(function(e){observedPaths[e.path]=1;});
   (ctx.allEndpoints||[]).forEach(function(e){observedPaths[e.path]=1;});
-  // All regex inside this template literal MUST use new RegExp() with double-escaped backslashes.
-  // Regex literals like /\d+/ get their backslashes stripped by the outer template (\d → d).
-  var staticAssetRe=new RegExp("\\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map|pdf|mp4|mp3|webp|wasm)(?:\\?|$)","i");
-  var destructiveRe=new RegExp("\\/(?:delete|remove|destroy|purge|drop|revoke|ban|deactivate|unsubscribe|cancel|uninstall|wipe)(?:\\/|$|\\?)","i");
-  var templateRe=new RegExp("\\{[^}]+\\}");
+  // Regex patterns injected via ctx._re (defined in module scope, serialized through JSON)
+  // so backslashes survive the template-literal → eval → string-parser → RegExp chain intact.
+  var staticAssetRe=new RegExp(ctx._re.staticAsset.src,ctx._re.staticAsset.f);
+  var destructiveRe=new RegExp(ctx._re.destructive.src,ctx._re.destructive.f);
+  var templateRe=new RegExp(ctx._re.template.src,ctx._re.template.f);
   function shouldProbe(path){
     if(!path||typeof path!=="string"||path.length<3||path.length>250)return false;
     if(path.charAt(0)!=="/")return false;
@@ -2621,7 +2636,7 @@ if(ctx.aggroLevel!=="careful"){
 R.errors.push("STEP 35: API Version Downgrade");
 R.versionDowngrade=[];
 if(ctx.aggroLevel!=="careful"){
-  var versionRe=new RegExp("\\/v(\\d+)\\/");
+  var versionRe=new RegExp(ctx._re.version.src,ctx._re.version.f);
   var versioned=ctx.observedApis.filter(function(e){return versionRe.test(e.path);}).slice(0,8);
   for(var vdi=0;vdi<versioned.length;vdi++){
     var vEp=versioned[vdi];
