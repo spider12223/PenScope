@@ -70,13 +70,21 @@ document.getElementById("smapClose").addEventListener("click",()=>{document.getE
 document.getElementById("smapOverlay").addEventListener("click",e=>{if(e.target.id==="smapOverlay")e.target.classList.remove("show");});
 document.getElementById("smapDownloadAll").addEventListener("click",downloadAllSourceMaps);
 // v5.7: Load saved custom headers and probe preferences from chrome.storage.local
-try{chrome.storage.local.get(["penscopeCustomHeaders","penscopeRecursive","penscopeStealth"],r=>{
+try{chrome.storage.local.get(["penscopeCustomHeaders","penscopeRecursive","penscopeStealth","penscopeFullCapture"],r=>{
   const hdrEl=document.getElementById("probeHeaders");
   if(hdrEl&&r.penscopeCustomHeaders)hdrEl.value=r.penscopeCustomHeaders;
   const recEl=document.getElementById("probeRecursive");
   if(recEl&&typeof r.penscopeRecursive==="boolean")recEl.checked=r.penscopeRecursive;
   const stlEl=document.getElementById("probeStealth");
   if(stlEl&&typeof r.penscopeStealth==="boolean")stlEl.checked=r.penscopeStealth;
+  // v6.1.1 — full-capture override. When checked, the noisy-host fast path in
+  // background.js is bypassed so YouTube/Twitch/etc. get the full enrichment
+  // pipeline. Off by default (saves CPU on every page).
+  const fcEl=document.getElementById("probeFullCapture");
+  if(fcEl&&typeof r.penscopeFullCapture==="boolean"){
+    fcEl.checked=r.penscopeFullCapture;
+    chrome.runtime.sendMessage({action:"setFullCapture",enabled:fcEl.checked},()=>{void chrome.runtime.lastError;});
+  }
 });}catch(e){}
 const hdrTextarea=document.getElementById("probeHeaders");
 if(hdrTextarea){
@@ -97,6 +105,16 @@ if(stCb){
   stCb.addEventListener("click",e=>e.stopPropagation());
   stCb.addEventListener("change",e=>{
     try{chrome.storage.local.set({penscopeStealth:e.target.checked});}catch(err){}
+  });
+}
+// v6.1.1 — Full-capture toggle. Pushes the new value to background immediately so
+// the noisy-host shortcut in onBeforeRequest reflects the change without a reload.
+const fcCb=document.getElementById("probeFullCapture");
+if(fcCb){
+  fcCb.addEventListener("click",e=>e.stopPropagation());
+  fcCb.addEventListener("change",e=>{
+    try{chrome.storage.local.set({penscopeFullCapture:e.target.checked});}catch(err){}
+    chrome.runtime.sendMessage({action:"setFullCapture",enabled:e.target.checked},()=>{void chrome.runtime.lastError;});
   });
 }
 // v5.8: Deep tab filter — hide/show sections by substring match

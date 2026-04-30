@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PenScope",
-  "version": "6.1.0",
+  "version": "6.1.1",
   "description": "Bug bounty workbench in Chrome — Repeater + Intruder + Encoder + Diff + Site Map + Auth Matrix + 36 probe attacks + chain correlator + Red/Blue/Classic modes. Free, faster than Burp.",
   "permissions": ["webRequest","activeTab","scripting","tabs","cookies","debugger","notifications","alarms","storage"],
   "host_permissions": ["<all_urls>"],

@@ -15,7 +15,13 @@ const PS_CONFIG = {
   STORAGE_ITEM_LIMIT: 100,
   COMMENT_LIMIT: 50,
   INITIAL_SCAN_DELAY: 1500,
-  MUTATION_DEBOUNCE: 3000,
+  // v6.1.1 — Performance: bumped debounce 3000 → 5000ms. On YouTube/Twitch/etc.
+  // the DOM mutates constantly (live comments, autoplay, timer ticks) and any
+  // shorter window means runFullScan fires every few seconds, walking thousands of
+  // nodes and tanking the renderer. The MIN_SCAN_INTERVAL is a hard floor — even if
+  // mutations keep streaming in, we never scan more than once per 15s.
+  MUTATION_DEBOUNCE: 5000,
+  MIN_SCAN_INTERVAL: 15000,
   SECRET_MATCH_LIMIT: 5,
   INLINE_TEXT_LIMIT: 100000,
   XSS_MATCH_LIMIT: 3,
@@ -678,7 +684,68 @@ let _lastScanHash="";
 function quickHash(){const sample=(document.body?document.body.innerHTML.substring(0,5000):"")+document.querySelectorAll("*").length;let h=0;for(let i=0;i<sample.length;i++)h=((h<<5)-h+sample.charCodeAt(i))|0;return h.toString(36);}
 
 setTimeout(runFullScan,PS_CONFIG.INITIAL_SCAN_DELAY);
-let st;const obs=new MutationObserver(()=>{clearTimeout(st);st=setTimeout(()=>{const h=quickHash();if(h!==_lastScanHash){_lastScanHash=h;runFullScan();}},PS_CONFIG.MUTATION_DEBOUNCE);});
+
+// v6.1.1 — Smarter rescan scheduling. The previous version called runFullScan
+// directly from a 3-second debounce, which on busy pages (YouTube, Twitch, etc.)
+// caused the scan to fire every few seconds, walking tens of thousands of nodes
+// and competing with the renderer. New behavior:
+//   - Defer to requestIdleCallback (only run when the page isn't busy)
+//   - Hard-cap rescans to once per MIN_SCAN_INTERVAL (15s)
+//   - Skip entirely when the tab is hidden — defer until visible
+//   - Filter mutations to only those that add Element nodes (text-only mutations
+//     like timer ticks, character-data updates, are ignored)
+let _lastFullScan=0;let _scanScheduled=false;
+function scheduleFullScan(){
+  if(_scanScheduled)return;
+  _scanScheduled=true;
+  const now=Date.now();
+  const wait=Math.max(0,PS_CONFIG.MIN_SCAN_INTERVAL-(now-_lastFullScan));
+  setTimeout(()=>{
+    const runIt=()=>{
+      _scanScheduled=false;
+      // Tab is hidden — no rush. Wait for it to come back.
+      if(typeof document.visibilityState==="string"&&document.visibilityState==="hidden"){
+        const onShow=()=>{
+          document.removeEventListener("visibilitychange",onShow);
+          if(document.visibilityState==="visible")scheduleFullScan();
+        };
+        document.addEventListener("visibilitychange",onShow);
+        return;
+      }
+      const h=quickHash();
+      if(h!==_lastScanHash){
+        _lastScanHash=h;
+        _lastFullScan=Date.now();
+        try{runFullScan();}catch(e){console.warn('[PenScope]',e);}
+      }
+    };
+    // requestIdleCallback runs when the page is idle. timeout:5s ensures we
+    // eventually run even on perpetually-busy pages.
+    if(typeof requestIdleCallback==="function"){
+      requestIdleCallback(runIt,{timeout:5000});
+    }else{
+      runIt();
+    }
+  },wait);
+}
+
+let st;
+const obs=new MutationObserver(muts=>{
+  // Quick-reject: ignore mutations that didn't add any Element nodes. Text-only
+  // changes (timer ticks, character data updates) shouldn't trigger a rescan.
+  let elementAdded=false;
+  for(let i=0;i<muts.length;i++){
+    const m=muts[i];
+    if(!m.addedNodes||!m.addedNodes.length)continue;
+    for(let j=0;j<m.addedNodes.length;j++){
+      if(m.addedNodes[j].nodeType===1){elementAdded=true;break;}
+    }
+    if(elementAdded)break;
+  }
+  if(!elementAdded)return;
+  clearTimeout(st);
+  st=setTimeout(scheduleFullScan,PS_CONFIG.MUTATION_DEBOUNCE);
+});
 const target=document.body||document.documentElement;
 if(target)obs.observe(target,{childList:true,subtree:true});
 })();

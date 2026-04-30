@@ -1,5 +1,64 @@
 # PenScope Changelog
 
+## v6.1.1 — Performance: don't lag YouTube
+
+User reported PenScope made YouTube noticeably laggy. Confirmed two real hot paths
+and shipped surgical fixes. No feature regressions; engine still captures everything,
+just smarter about what it spends CPU on.
+
+### Hot path 1 — webRequest noisy-host shortcut
+
+YouTube fires hundreds of `googlevideo.com` chunk requests per minute for video
+data. The previous webRequest listener ran the full enrichment pipeline on each
+(14 AUTH_PATTERN regexes, path-param detection, tag rules, subdomain
+classification, API version detection, Swagger lookup) — all on bytes the hunter
+never cares about.
+
+Now `onBeforeRequest` and `onHeadersReceived` short-circuit early for ~50 known
+noisy host suffixes (video CDNs, ad networks, telemetry endpoints, large static
+asset CDNs). Noisy-host requests still get logged as endpoints (one push, minimal
+metadata) so they show up in the Site Map — but skip the expensive enrichment.
+
+Same shortcut for "light" resource types (`image`, `media`, `font`, `stylesheet`,
+`object`, `ping`, `csp_report`) on any host. These almost never carry
+security-relevant URL params; logging them in full was burning CPU for no payoff.
+
+User override: **"Full capture on noisy hosts"** checkbox in the Probe dropdown.
+When checked, the noisy-host fast path is bypassed and v6.0 behavior is restored.
+Persisted to `chrome.storage.local`. Default off.
+
+### Hot path 2 — content.js MutationObserver
+
+The previous MutationObserver fired `runFullScan` 3 seconds after any DOM mutation.
+On YouTube, the DOM mutates constantly (live comments, autoplay queue, time ticks,
+chip updates). The 3s debounce kept resetting and the `quickHash` kept changing,
+so `runFullScan` ended up firing every few seconds, walking tens of thousands of
+nodes via `document.querySelectorAll("*")`.
+
+Three fixes layered together:
+
+1. **Idle-deferred scan**: rescans now run via `requestIdleCallback` (5s timeout
+   fallback). The browser only runs them when the page is genuinely idle, so the
+   scan never competes with the renderer for cycles.
+2. **Hard floor between scans**: `MIN_SCAN_INTERVAL = 15s`. Even on perpetually
+   busy pages, runFullScan won't fire more than once per 15 seconds.
+3. **Element-only mutation filter**: text-only mutations (timer ticks,
+   character-data updates) no longer trigger the observer. Only mutations that
+   add Element nodes count.
+4. **Skip on hidden tabs**: `document.visibilityState === "hidden"` defers the
+   scan until the tab is visible again.
+
+`MUTATION_DEBOUNCE` also bumped from 3s to 5s.
+
+### What this changes for the user
+
+- YouTube, Twitch, X, TikTok, etc. should be smooth again
+- Recon-quality on actual targets (the use case PenScope is built for) is unchanged
+- Site Map still includes every captured endpoint; only enrichment is light for
+  noisy hosts
+- If a user IS specifically auditing YouTube/Twitch/etc. as a target, the
+  Full-capture toggle restores v6.0 behavior in one click
+
 ## v6.1.0 — The Bug Bounty Workbench
 
 PenScope now ships with the same daily-driver tools that hunters pay $449/year for in

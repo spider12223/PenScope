@@ -475,13 +475,72 @@ const RESP_PATTERNS=[
   {name:"HuggingFace Token",regex:/hf_[a-zA-Z0-9]{34,}/g,sev:"high",desc:"HuggingFace token in response"},
 ];
 
+// v6.1.1 — Performance: skip the expensive analysis path for "noisy" hosts —
+// video chunks, ad networks, telemetry endpoints, large CDNs that don't host app
+// code. On YouTube specifically, googlevideo.com fires hundreds of chunk requests
+// per minute; running 14 AUTH_PATTERN regexes + path-param detection + subdomain
+// classification + Swagger lookup on each is a meaningful drag on the renderer.
+// Noisy hosts still get logged as endpoints (one push, minimal metadata) so they
+// show up in the site map, but skip the expensive enrichment.
+const NOISY_HOST_SUFFIXES=[
+  // Video / media CDNs
+  "googlevideo.com","ytimg.com","youtube-nocookie.com",
+  "twitch.tv","ttvnw.net","jtvnw.net",
+  "vimeocdn.com","akamaized.net","cloudfront.net","fbcdn.net","cdninstagram.com",
+  "tiktokcdn.com","ibytedtos.com","muscdn.com","tiktokv.com",
+  "spotifycdn.com","scdn.co",
+  // Ad networks + analytics (high frequency, low recon value)
+  "doubleclick.net","googlesyndication.com","googletagmanager.com","google-analytics.com",
+  "googleadservices.com","adservice.google.com","2mdn.net","adnxs.com",
+  "scorecardresearch.com","quantserve.com","outbrain.com","taboola.com",
+  "facebook.com/tr","connect.facebook.net","analytics.tiktok.com","analytics.twitter.com",
+  "branch.io","amplitude.com","heap.io","mixpanel.com","segment.com","segment.io",
+  "hotjar.com","mouseflow.com","fullstory.com","logrocket.com","sentry-cdn.com","sentry.io",
+  "datadog-rum.com","newrelic.com","nr-data.net","optimizely.com","launchdarkly.com",
+  "bugsnag.com","appdynamics.com","kissmetrics.com","crazyegg.com",
+  // Static asset CDNs that don't host app code
+  "gstatic.com","googleusercontent.com","googleapis.com",
+  "fonts.googleapis.com","fonts.gstatic.com",
+  "telemetry.mozilla.org","incoming.telemetry.mozilla.org",
+];
+// v6.1.1 — Full-capture override. When the user enables the "Full capture on noisy
+// hosts" toggle in the probe menu, isNoisyHost() always returns false, restoring
+// the v6.0 behavior. Persisted to chrome.storage.local; restored at SW startup.
+let _fullCaptureEnabled=false;
+try{chrome.storage.local.get(["penscopeFullCapture"],r=>{if(typeof r.penscopeFullCapture==="boolean")_fullCaptureEnabled=r.penscopeFullCapture;});}catch(e){}
+function isNoisyHost(hostname){
+  if(_fullCaptureEnabled)return false;
+  if(!hostname)return false;
+  for(let i=0;i<NOISY_HOST_SUFFIXES.length;i++){
+    const s=NOISY_HOST_SUFFIXES[i];
+    if(hostname===s||hostname.endsWith("."+s))return true;
+  }
+  return false;
+}
+// Cheap-to-check resource types that almost never carry security-relevant URL params.
+// We still capture the request as an endpoint, but skip AUTH_PATTERNS, path params,
+// API version, Swagger, etc.
+const LIGHT_TYPES={"image":1,"imageset":1,"media":1,"font":1,"stylesheet":1,"object":1,"ping":1,"csp_report":1};
+
 // -------------------------------------------------------
 // 1. PASSIVE — webRequest
 // -------------------------------------------------------
 chrome.webRequest.onBeforeRequest.addListener((details)=>{
   if(details.tabId<0)return;const tab=T(details.tabId);let url;try{url=new URL(details.url);}catch{return;}
   if(url.protocol==="chrome-extension:"||url.protocol==="data:"||url.protocol==="chrome:")return;
-  const path=url.pathname;const epKey=`${details.method||"GET"}:${url.hostname}:${path}`;const tags=tagEndpoint(path);
+  const path=url.pathname;const epKey=`${details.method||"GET"}:${url.hostname}:${path}`;
+  // v6.1.1 — fast path for noisy hosts and lightweight resource types: log the
+  // endpoint and bail. Skips the regex array + Set ops + tag rules below.
+  const noisy=isNoisyHost(url.hostname);
+  const light=!!LIGHT_TYPES[details.type];
+  if(noisy||light){
+    if(!seen(details.tabId,"ep",epKey)){
+      const ep={method:details.method||"GET",url:details.url,path,host:url.hostname,query:url.search,type:details.type,timestamp:Date.now(),initiator:details.initiator||"",tags:[],status:null,responseSize:null};
+      tab.endpoints.push(ep);tab.endpointIndex.set(details.url,ep);
+    }
+    return;
+  }
+  const tags=tagEndpoint(path);
   if(!seen(details.tabId,"ep",epKey)){const ep={method:details.method||"GET",url:details.url,path,host:url.hostname,query:url.search,type:details.type,timestamp:Date.now(),initiator:details.initiator||"",tags,status:null,responseSize:null};tab.endpoints.push(ep);tab.endpointIndex.set(details.url,ep);}
   url.searchParams.forEach((val,key)=>{const pk=`q:${path}:${key}`;if(!tab.params[pk])tab.params[pk]={path,param:key,example:val.substring(0,100),source:"query",method:details.method||"GET"};});
   if(details.requestBody?.formData)for(const[key,vals]of Object.entries(details.requestBody.formData)){const pk=`b:${path}:${key}`;if(!tab.params[pk])tab.params[pk]={path,param:key,example:(vals[0]||"").substring(0,100),source:"body",method:details.method||"GET"};}
@@ -507,6 +566,10 @@ chrome.webRequest.onBeforeRequest.addListener((details)=>{
 // -------------------------------------------------------
 chrome.webRequest.onHeadersReceived.addListener((details)=>{
   if(details.tabId<0)return;const valid=["main_frame","xmlhttprequest","other","sub_frame"];if(!valid.includes(details.type))return;
+  // v6.1.1 — short-circuit noisy hosts here too. Telemetry endpoints often arrive
+  // as xmlhttprequest (so the type filter above doesn't reject them) and they're
+  // the second-largest source of overhead on YouTube/SaaS apps after webRequest.
+  try{const u=new URL(details.url);if(isNoisyHost(u.hostname))return;}catch(e){return;}
   const tab=T(details.tabId);const hdrs={},leaks=[];
   (details.responseHeaders||[]).forEach(h=>{const n=h.name.toLowerCase();hdrs[n]=h.value;if(LEAK_HEADERS.includes(n))leaks.push({name:h.name,value:h.value});if(TECH_MAP[n]){const tech=TECH_MAP[n](h.value);if(tech&&!seen(details.tabId,"tech-hdr",tech))tab.techStack.push({name:tech,source:"header",confidence:"high"});}if(n==="sourcemap"||n==="x-sourcemap"){if(!seen(details.tabId,"sm",h.value))tab.sourceMaps.push({url:details.url,mapUrl:h.value,source:"header"});}});
   const statusCode=details.statusCode;
@@ -5722,6 +5785,12 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse)=>{
       if(msg.sourceMaps)msg.sourceMaps.forEach(x=>{if(!t.sourceMaps.find(y=>y.mapUrl===x.mapUrl))t.sourceMaps.push(x);});
     }sendResponse({ok:true});return true;}
     case "runScan":{chrome.tabs.sendMessage(msg.tabId,{action:"scan"},r=>sendResponse(r||{ok:true}));return true;}
+    // v6.1.1 — Update full-capture flag at runtime so the user's toggle takes effect
+    // immediately without an extension reload.
+    case "setFullCapture":{
+      _fullCaptureEnabled=!!msg.enabled;
+      sendResponse({ok:true,enabled:_fullCaptureEnabled});
+      return true;}
     case "getCookies":{const t=T(msg.tabId);if(t.url){chrome.cookies.getAll({url:t.url},cookies=>{t.cookies=(cookies||[]).map(c=>({name:c.name,value:c.value.substring(0,200),domain:c.domain,path:c.path,secure:c.secure,httpOnly:c.httpOnly,sameSite:c.sameSite,expirationDate:c.expirationDate,session:c.session}));sendResponse(t.cookies);});}else sendResponse([]);return true;}
     case "reportRuntime":{sendResponse({ok:true});return true;}
     case "reportIntercept":{sendResponse({ok:true});return true;}
