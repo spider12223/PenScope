@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+  :root {
+    --bg0: #06060a;
+    --bg1: rgba(14, 14, 22, 0.85);
+    --bg2: rgba(20, 20, 32, 0.7);
+    --bg3: rgba(28, 28, 44, 0.6);
+    --glass: rgba(16, 16, 28, 0.55);
+    --glass2: rgba(24, 24, 40, 0.45);
+    --glass3: rgba(32, 32, 52, 0.35);
+    --glassbrd: rgba(255, 255, 255, 0.06);
+    --glassbrd2: rgba(255, 255, 255, 0.1);
+    --brd: rgba(255, 255, 255, 0.04);
+    --brd2: rgba(255, 255, 255, 0.08);
+    --bgh: rgba(255, 255, 255, 0.03);
+    --t1: #eaeaf6;
+    --t2: #9898b8;
+    --t3: #55556e;
+    --red: #ff3a5c;
+    --orange: #ff7b3a;
+    --yellow: #ffc53a;
+    --green: #3aff8a;
+    --blue: #3aa8ff;
+    --purple: #9b5aff;
+    --teal: #3addc4;
+    --coral: #ff6b5a;
+    --pink: #ff5aaa;
+    --crit-bg: rgba(255,58,92,.1);  --crit: #ff3a5c;
+    --high-bg: rgba(255,123,58,.1); --high: #ff7b3a;
+    --med-bg: rgba(255,197,58,.1);  --med: #dda820;
+    --low-bg: rgba(58,168,255,.1);  --low: #3aa8ff;
+    --info-bg: rgba(85,85,110,.1);  --info: #55556e;
+    --glow-purple: 0 0 30px rgba(155,90,255,.15);
+    --glow-red: 0 0 20px rgba(255,58,92,.1);
+    --glow-blue: 0 0 20px rgba(58,168,255,.1);
+    --font: 'Plus Jakarta Sans', -apple-system, sans-serif;
+    --mono: 'JetBrains Mono', 'SF Mono', monospace;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    width: 720px;
+    max-height: 600px;
+    overflow-y: auto;
+    background: var(--bg0);
+    background-image:
+      radial-gradient(ellipse at 20% 0%, rgba(155,90,255,.08) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 100%, rgba(255,58,92,.06) 0%, transparent 50%),
+      radial-gradient(ellipse at 50% 50%, rgba(58,168,255,.04) 0%, transparent 60%);
+    color: var(--t1);
+    font-family: var(--font);
+    font-size: 12px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(155,90,255,.3) transparent;
+  }
+
+  /* v6.0 — MODE THEME SWAP. Every existing `var(--purple)` / `var(--pink)` reference
+     automatically picks up the new color when the body class is swapped. Classic mode
+     keeps the v5.9 vars unchanged (no body class needed since :root applies). The trick:
+     we override the SAME variable names so no rule selector has to change. */
+  body.mode-classic { /* uses :root vars verbatim — byte-for-byte v5.9 */ }
+
+  body.mode-red {
+    --purple: #ff3a5c;
+    --pink:   #ff6b3a;
+    --glow-purple: 0 0 30px rgba(255,58,92,.18);
+    --glow-red:    0 0 22px rgba(255,58,92,.14);
+    background-image:
+      radial-gradient(ellipse at 20% 0%, rgba(255,58,92,.10) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 100%, rgba(255,107,58,.08) 0%, transparent 50%),
+      radial-gradient(ellipse at 50% 50%, rgba(180,30,60,.05) 0%, transparent 60%);
+    scrollbar-color: rgba(255,58,92,.3) transparent;
+  }
+  body.mode-red::-webkit-scrollbar-thumb { background: rgba(255,58,92,.3); }
+
+  body.mode-blue {
+    --purple: #3aa8ff;
+    --pink:   #3addc4;
+    --glow-purple: 0 0 30px rgba(58,168,255,.15);
+    --glow-blue:   0 0 22px rgba(58,221,196,.12);
+    background-image:
+      radial-gradient(ellipse at 20% 0%, rgba(58,168,255,.10) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 100%, rgba(58,221,196,.08) 0%, transparent 50%),
+      radial-gradient(ellipse at 50% 50%, rgba(30,80,140,.05) 0%, transparent 60%);
+    scrollbar-color: rgba(58,168,255,.3) transparent;
+  }
+  body.mode-blue::-webkit-scrollbar-thumb { background: rgba(58,168,255,.3); }
+
+  /* v6.0 — Mode toggle pill. role=tablist 3-segment control in the header. Active
+     segment fills with the mode's primary gradient; inactive segments are ghost.
+     Visible focus ring satisfies the keyboard-navigation accessibility requirement. */
+  .mode-toggle{display:inline-flex;background:var(--glass2);border:1px solid var(--glassbrd2);border-radius:8px;padding:2px;gap:2px;margin-right:2px}
+  .mode-seg{padding:3px 8px;border:none;background:transparent;color:var(--t3);font-family:var(--font);font-size:10px;font-weight:700;cursor:pointer;border-radius:6px;transition:all .15s ease;letter-spacing:.2px;min-height:22px}
+  .mode-seg:hover{color:var(--t1)}
+  .mode-seg:focus-visible{outline:2px solid var(--purple);outline-offset:1px}
+  .mode-seg[aria-selected="true"]{background:linear-gradient(135deg,var(--purple),var(--pink));color:#fff;box-shadow:0 0 14px rgba(155,90,255,.35)}
+  body.mode-red .mode-seg[aria-selected="true"]{box-shadow:0 0 14px rgba(255,58,92,.35)}
+  body.mode-blue .mode-seg[aria-selected="true"]{box-shadow:0 0 14px rgba(58,168,255,.35)}
+
+  /* Universal focus-visible affordance for new interactive elements added in v6 */
+  .v6-focusable:focus-visible{outline:2px solid var(--purple);outline-offset:1px;border-radius:6px}
+  body::-webkit-scrollbar { width: 4px; }
+  body::-webkit-scrollbar-thumb { background: rgba(155,90,255,.3); border-radius: 4px; }
+  body::-webkit-scrollbar-track { background: transparent; }
+
+  .hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:var(--glass);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--glassbrd);position:sticky;top:0;z-index:100}
+  .hdr-l{display:flex;align-items:center;gap:10px}
+  .logo{width:28px;height:28px;background:linear-gradient(135deg,var(--purple),var(--pink));border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;color:#fff;box-shadow:var(--glow-purple);position:relative}
+  .logo::after{content:'';position:absolute;inset:-1px;border-radius:9px;background:linear-gradient(135deg,rgba(155,90,255,.4),rgba(255,90,170,.4));z-index:-1;filter:blur(6px)}
+  .title{font-weight:700;font-size:15px;letter-spacing:-.4px}
+  .title em{font-style:normal;background:linear-gradient(135deg,var(--purple),var(--pink));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .title .ver{font-size:9px;color:var(--t3);font-weight:400;margin-left:4px;-webkit-text-fill-color:var(--t3)}
+  .hdr-r{display:flex;gap:5px;align-items:center;position:relative;flex-wrap:wrap;justify-content:flex-end}
+  .btn{padding:5px 10px;border:1px solid var(--glassbrd2);border-radius:8px;background:var(--glass2);backdrop-filter:blur(10px);color:var(--t2);font-family:var(--mono);font-size:10px;cursor:pointer;transition:all .2s ease;white-space:nowrap}
+  .btn:hover{background:var(--glass3);color:var(--t1);border-color:rgba(255,255,255,.15);transform:translateY(-1px)}
+  .btn:active{transform:translateY(0)}
+  .btn-main{background:linear-gradient(135deg,var(--purple),var(--pink));border:none;color:#fff;font-weight:700;font-family:var(--font);font-size:11px;box-shadow:var(--glow-purple)}.btn-main:hover{opacity:.9;box-shadow:0 0 40px rgba(155,90,255,.25)}
+  .btn-claude{background:linear-gradient(135deg,#d97706,var(--coral));border:none;color:#fff;font-weight:700;font-family:var(--font);font-size:11px;padding:5px 12px;box-shadow:0 0 20px rgba(217,119,6,.15)}.btn-claude:hover{box-shadow:0 0 30px rgba(217,119,6,.25)}
+  .btn-deep{background:var(--glass2);border:1px solid var(--glassbrd2);color:var(--t3);font-weight:600;font-family:var(--font);font-size:10px;padding:5px 10px;transition:all .3s ease}.btn-deep.active{background:linear-gradient(135deg,var(--purple),var(--pink));border-color:transparent;color:#fff;box-shadow:var(--glow-purple),inset 0 0 20px rgba(255,255,255,.1)}
+  .btn-probe{background:var(--glass2);border:1px solid var(--glassbrd2);color:var(--t3);font-weight:600;font-family:var(--font);font-size:10px;padding:5px 10px;transition:all .3s ease}.btn-probe:hover{border-color:rgba(255,123,58,.4)}.btn-probe.running{background:linear-gradient(135deg,var(--orange),var(--coral));border-color:transparent;color:#fff;box-shadow:0 0 20px rgba(255,123,58,.2);animation:probePulse 1.5s infinite}.btn-probe.done{background:linear-gradient(135deg,var(--green),var(--teal));border-color:transparent;color:#000;font-weight:700}
+  @keyframes probePulse{0%,100%{opacity:1}50%{opacity:.7}}
+
+  .tgt{padding:8px 16px;background:var(--glass);backdrop-filter:blur(16px);border-bottom:1px solid var(--glassbrd);font-family:var(--mono);font-size:10px;color:var(--t2);display:flex;align-items:center;gap:8px}
+  .dot{width:6px;height:6px;background:var(--green);border-radius:50%;box-shadow:0 0 8px rgba(58,255,138,.5);animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 8px rgba(58,255,138,.5)}50%{opacity:.4;box-shadow:0 0 4px rgba(58,255,138,.2)}}
+  .tgt-url{color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .deep-bar{padding:6px 16px;background:rgba(155,90,255,.04);backdrop-filter:blur(10px);border-bottom:1px solid rgba(155,90,255,.1);font-size:10px;color:var(--purple);display:none;align-items:center;gap:6px}.deep-bar.show{display:flex}.deep-bar .dp{width:5px;height:5px;background:var(--purple);border-radius:50%;box-shadow:0 0 8px rgba(155,90,255,.6);animation:pulse 1.5s infinite}
+
+  .stats{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;padding:10px 16px;border-bottom:1px solid var(--glassbrd)}
+  .st{background:var(--glass);backdrop-filter:blur(12px);border-radius:10px;padding:8px 6px;text-align:center;border:1px solid var(--glassbrd);transition:all .2s ease}
+  .st:hover{border-color:var(--glassbrd2);transform:translateY(-1px);box-shadow:0 4px 16px rgba(0,0,0,.3)}
+  .st-n{font-family:var(--mono);font-size:18px;font-weight:700;line-height:1}.st-l{font-size:8px;color:var(--t3);margin-top:3px;text-transform:uppercase;letter-spacing:.8px;font-weight:600}
+
+  .tabs{display:flex;border-bottom:1px solid var(--glassbrd);background:var(--glass);backdrop-filter:blur(16px);overflow-x:auto;padding:0 8px}.tabs::-webkit-scrollbar{height:0}
+  .tab{padding:9px 8px;text-align:center;font-size:10px;font-weight:600;color:var(--t3);cursor:pointer;border-bottom:2px solid transparent;transition:all .2s ease;white-space:nowrap;flex-shrink:0;position:relative}.tab:hover{color:var(--t2)}.tab.active{color:var(--t1);border-bottom-color:var(--purple)}.tab.active::after{content:'';position:absolute;bottom:-1px;left:20%;right:20%;height:2px;background:var(--purple);filter:blur(4px)}
+  .tab .b{display:inline-block;background:var(--glass3);padding:1px 5px;border-radius:8px;font-family:var(--mono);font-size:9px;margin-left:3px}.tab.active .b{background:linear-gradient(135deg,var(--purple),var(--pink));color:#fff;box-shadow:0 0 10px rgba(155,90,255,.3)}
+  .tab.deep-tab{color:rgba(155,90,255,.5)}.tab.deep-tab.active{border-bottom-color:var(--purple);color:var(--purple)}.tab.deep-tab.active .b{background:linear-gradient(135deg,var(--purple),var(--pink))}
+  .tc{display:none}.tc.active{display:block}
+
+  .flt{padding:8px 16px}.flt input{width:100%;background:var(--glass);backdrop-filter:blur(10px);border:1px solid var(--glassbrd2);border-radius:8px;padding:7px 12px;color:var(--t1);font-family:var(--mono);font-size:10px;outline:none;transition:all .2s ease}.flt input:focus{border-color:rgba(155,90,255,.4);box-shadow:0 0 20px rgba(155,90,255,.1)}.flt input::placeholder{color:var(--t3)}
+
+  .ep-grp{padding:4px 16px}.ep-grp-t{font-family:var(--mono);font-size:9px;color:var(--t3);padding:6px 0;border-bottom:1px solid var(--glassbrd);margin-bottom:4px;text-transform:uppercase;letter-spacing:.8px;font-weight:600}
+  .ep{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:10px;transition:all .15s ease}.ep:hover{background:var(--bgh)}
+  .m{font-weight:700;font-size:9px;padding:2px 6px;border-radius:4px;min-width:38px;text-align:center;font-family:var(--mono)}
+  .m-GET{background:rgba(58,168,255,.1);color:var(--blue)}.m-POST{background:rgba(58,255,138,.1);color:var(--green)}.m-PUT{background:rgba(255,197,58,.1);color:var(--yellow)}.m-DELETE{background:rgba(255,58,92,.1);color:var(--red)}.m-PATCH{background:rgba(155,90,255,.1);color:var(--purple)}.m-OPTIONS,.m-HEAD{background:rgba(85,85,110,.1);color:var(--t3)}
+  .ep-p{color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.ep-t{color:var(--t3);font-size:9px}
+  .ep-status{font-size:9px;font-weight:600;min-width:24px;text-align:center}.s2{color:var(--green)}.s3{color:var(--yellow)}.s4{color:var(--orange)}.s5{color:var(--red)}
+  .ep-size{font-size:9px;color:var(--t3);min-width:40px;text-align:right}
+  .ep-tag{font-size:8px;padding:1px 5px;border-radius:4px;font-weight:600}
+
+  .sev{display:inline-block;padding:2px 7px;border-radius:4px;font-size:9px;font-weight:700;font-family:var(--mono);text-transform:uppercase;letter-spacing:.3px}
+  .sev-critical{background:var(--crit-bg);color:var(--crit);box-shadow:0 0 12px rgba(255,58,92,.1)}.sev-high{background:var(--high-bg);color:var(--high)}.sev-medium{background:var(--med-bg);color:var(--med)}.sev-low{background:var(--low-bg);color:var(--low)}.sev-info{background:var(--info-bg);color:var(--info)}
+
+  .fi{padding:10px 16px;border-bottom:1px solid var(--glassbrd);transition:all .15s ease}.fi:hover{background:var(--bgh)}.fi-h{display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap}.fi-t{font-weight:600;font-size:11px}
+  .fi-v{font-family:var(--mono);font-size:10px;color:var(--yellow);background:var(--glass);backdrop-filter:blur(8px);padding:4px 8px;border-radius:6px;border:1px solid var(--glassbrd);overflow-x:auto;white-space:nowrap;margin-top:4px;cursor:pointer;transition:all .2s ease}.fi-v:hover{background:var(--glass3);border-color:var(--glassbrd2);box-shadow:0 0 12px rgba(255,197,58,.08)}
+  .fi-m{font-size:9px;color:var(--t3);margin-top:3px}
+
+  .hs{padding:6px 16px}.hs-t{font-weight:700;font-size:11px;padding:8px 0;color:var(--t2);border-bottom:1px solid var(--glassbrd);margin-bottom:4px;letter-spacing:-.2px;cursor:pointer;user-select:none;transition:color .15s ease}
+  #rD .hs-t::before{content:"▾ ";color:var(--t3);font-size:9px;margin-right:2px}
+  #rD .hs.collapsed>*:not(.hs-t){display:none !important}
+  #rD .hs.collapsed{padding-bottom:0}
+  #rD .hs.collapsed .hs-t::before{content:"▸ "}
+  #rD .hs.collapsed .hs-t{margin-bottom:0;border-bottom:none;opacity:.65}
+  #rD .hs-t:hover{color:var(--t1)}
+  .hi{display:flex;align-items:flex-start;gap:6px;padding:4px 0;font-size:11px}.hi-n{font-family:var(--mono);font-size:10px;color:var(--t1);min-width:80px}.hi-d{color:var(--t2);font-size:10px;flex:1}.lv{font-family:var(--mono);color:var(--orange);font-size:10px}
+
+  .empty{padding:40px 20px;text-align:center;color:var(--t3)}.empty-i{font-size:28px;margin-bottom:8px;opacity:.5}.empty-t{font-size:11px;color:var(--t3)}
+  .toast{position:fixed;bottom:30px;left:50%;transform:translateX(-50%) translateY(10px);background:linear-gradient(135deg,var(--purple),var(--pink));color:#fff;padding:6px 18px;border-radius:8px;font-size:11px;font-weight:700;display:none;z-index:100;box-shadow:var(--glow-purple);letter-spacing:.3px}
+  .ftr{padding:8px 16px;border-top:1px solid var(--glassbrd);display:flex;justify-content:space-between;font-size:9px;color:var(--t3);font-family:var(--mono);background:var(--glass);backdrop-filter:blur(16px)}
+
+  .tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:9px;font-family:var(--mono);margin-right:3px;margin-bottom:2px;font-weight:600}
+  .tag-high{background:rgba(58,255,138,.08);color:var(--green)}.tag-med{background:rgba(58,168,255,.08);color:var(--blue)}.tag-low{background:rgba(85,85,110,.08);color:var(--t2)}
+
+  .exp-menu{position:absolute;right:0;top:100%;margin-top:4px;background:var(--glass);backdrop-filter:blur(20px);border:1px solid var(--glassbrd2);border-radius:10px;padding:5px;z-index:200;display:none;min-width:160px;box-shadow:0 8px 32px rgba(0,0,0,.5)}.exp-menu.show{display:block}
+  .exp-item{padding:6px 10px;border-radius:6px;cursor:pointer;font-size:11px;color:var(--t2);transition:all .15s ease}.exp-item:hover{background:var(--glass3);color:var(--t1)}
+  .deep-wrap{position:relative;display:inline-flex;align-items:stretch;gap:0}
+  .deep-drop-btn{padding:5px 6px;border-radius:0 8px 8px 0;background:var(--glass);border:1px solid var(--glassbrd);border-left:none;color:var(--t3);cursor:pointer;font-size:10px;align-self:stretch;display:flex;align-items:center;transition:all .15s ease}.deep-drop-btn:hover{color:var(--t1);background:var(--glass2)}
+  .deep-menu{position:absolute;left:0;top:100%;margin-top:4px;background:var(--glass);backdrop-filter:blur(20px);border:1px solid var(--glassbrd2);border-radius:10px;padding:5px;z-index:200;display:none;min-width:200px;box-shadow:0 8px 32px rgba(0,0,0,.5)}.deep-menu.show{display:block}
+  .deep-item{padding:7px 10px;border-radius:6px;cursor:pointer;font-size:11px;color:var(--t2);transition:all .15s ease;white-space:nowrap}.deep-item:hover{background:var(--glass3);color:var(--t1)}
+  .smap-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);z-index:50;display:none;align-items:center;justify-content:center}.smap-overlay.show{display:flex}
+  .smap-panel{background:var(--bg);border:1px solid var(--glassbrd2);border-radius:14px;padding:16px;width:90%;max-width:500px;max-height:80vh;overflow-y:auto;box-shadow:0 16px 64px rgba(0,0,0,.6)}
+  .smap-title{font-size:14px;font-weight:700;color:var(--t1);margin-bottom:8px}.smap-sub{font-size:10px;color:var(--t3);margin-bottom:12px}
+  .smap-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;font-family:var(--mono);font-size:10px;margin-bottom:4px;background:var(--glass);border:1px solid var(--glassbrd)}
+  .smap-url{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--t1)}
+  .smap-status{font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px}
+  .smap-dl{padding:3px 8px;border-radius:6px;border:1px solid var(--green);color:var(--green);background:transparent;cursor:pointer;font-size:9px;font-weight:600;transition:all .15s ease}.smap-dl:hover{background:rgba(58,255,138,.1)}
+  .smap-close{padding:5px 12px;border-radius:8px;border:1px solid var(--glassbrd);color:var(--t2);background:transparent;cursor:pointer;font-size:11px;margin-top:10px}.smap-close:hover{background:var(--glass2);color:var(--t1)}
+
+  .form-card{padding:10px 16px;border-bottom:1px solid var(--glassbrd);transition:all .15s ease}.form-card:hover{background:var(--bgh)}.form-hdr{display:flex;align-items:center;gap:6px;margin-bottom:4px}.form-action{font-family:var(--mono);font-size:10px;color:var(--blue);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.form-tags{display:flex;flex-wrap:wrap;gap:3px;margin-top:3px}
+
+  .glob{padding:10px 16px;border-bottom:1px solid var(--glassbrd);transition:all .15s ease}.glob:hover{background:var(--bgh)}.glob-key{font-family:var(--mono);font-size:11px;color:var(--purple);font-weight:600}
+  .glob-pre{font-family:var(--mono);font-size:10px;color:var(--t2);background:var(--glass);backdrop-filter:blur(8px);padding:6px 8px;border-radius:6px;border:1px solid var(--glassbrd);margin-top:4px;max-height:80px;overflow:auto;white-space:pre-wrap;word-break:break-all;cursor:pointer}
+
+  .stor-sec{padding:6px 16px}.stor-title{font-size:11px;font-weight:700;color:var(--t2);padding:6px 0;border-bottom:1px solid var(--glassbrd);margin-bottom:4px}
+  .stor-row{display:flex;gap:8px;padding:4px 0;font-family:var(--mono);font-size:10px}.stor-k{color:var(--teal);min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.stor-v{color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;cursor:pointer}
+
+  .link-row{display:flex;align-items:center;gap:6px;padding:4px 16px;font-family:var(--mono);font-size:10px;transition:all .15s ease}.link-row:hover{background:var(--bgh)}.link-type{color:var(--t3);font-size:9px;min-width:44px}.link-url{color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;cursor:pointer}
+
+  .deep-finding{padding:10px 16px;border-bottom:1px solid var(--glassbrd);transition:all .15s ease}.deep-finding:hover{background:var(--bgh)}
+  .deep-ctx{font-family:var(--mono);font-size:9px;color:var(--t3);background:var(--glass);backdrop-filter:blur(8px);padding:5px 8px;border-radius:6px;border:1px solid var(--glassbrd);margin-top:4px;max-height:60px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+  .deep-url{font-family:var(--mono);font-size:9px;color:var(--t3);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  .ws-msg{padding:8px 16px;border-bottom:1px solid var(--glassbrd);font-family:var(--mono);font-size:10px}
+  .ws-dir{font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px}.ws-recv{background:rgba(58,221,196,.08);color:var(--teal)}.ws-sent{background:rgba(255,123,58,.08);color:var(--orange)}
+  .ws-data{color:var(--t2);background:var(--glass);padding:4px 8px;border-radius:6px;border:1px solid var(--glassbrd);margin-top:4px;max-height:60px;overflow:auto;white-space:pre-wrap;word-break:break-all;cursor:pointer}
+
+  .cert-row{display:flex;gap:8px;padding:5px 16px;font-size:11px}.cert-k{color:var(--t3);min-width:100px;font-weight:600}.cert-v{color:var(--t1);font-family:var(--mono);font-size:10px;word-break:break-all}
+  .auth-item{padding:8px 16px;border-bottom:1px solid var(--glassbrd);transition:all .15s ease}.auth-item:hover{background:var(--bgh)}.auth-hdr{font-family:var(--mono);font-size:10px;display:flex;gap:6px;align-items:center;margin-top:3px}.auth-name{color:var(--coral);font-weight:700}.auth-val{color:var(--yellow);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;cursor:pointer}
+  .err-body{font-family:var(--mono);font-size:9px;color:var(--t2);background:var(--glass);padding:5px 8px;border-radius:6px;border:1px solid var(--glassbrd);margin-top:4px;max-height:100px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+  .redir{padding:5px 16px;font-family:var(--mono);font-size:10px;display:flex;gap:6px;align-items:center}.redir-arrow{color:var(--yellow)}.redir-url{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .apiver{padding:8px 16px;border-bottom:1px solid var(--glassbrd);transition:all .15s ease}.apiver:hover{background:var(--bgh)}.apiver-suggest{font-family:var(--mono);font-size:10px;color:var(--coral);cursor:pointer;padding:2px 0}
+
+  .con-row{padding:4px 16px;border-bottom:1px solid var(--glassbrd);font-family:var(--mono);font-size:10px;display:flex;gap:6px;align-items:flex-start;transition:all .15s ease;cursor:pointer}.con-row:hover{background:var(--bgh)}
+  .con-lvl{font-size:8px;font-weight:700;padding:1px 5px;border-radius:3px;min-width:36px;text-align:center;flex-shrink:0;margin-top:1px}
+  .con-err{background:rgba(255,58,92,.15);color:var(--red)}.con-warn{background:rgba(255,197,58,.15);color:var(--yellow)}.con-info{background:rgba(58,168,255,.15);color:var(--blue)}.con-log{background:rgba(85,85,110,.1);color:var(--t3)}.con-verb{background:rgba(155,90,255,.1);color:var(--purple)}
+  .con-text{color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}.con-text.expanded{white-space:pre-wrap;word-break:break-all}
+  .con-src{color:var(--t3);font-size:9px;flex-shrink:0;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+  .con-time{color:var(--t3);font-size:9px;flex-shrink:0;min-width:45px;text-align:right}
+  .con-stats{display:flex;gap:12px;padding:8px 16px;font-size:10px;border-bottom:1px solid var(--glassbrd);background:var(--glass)}
+  .con-stat{display:flex;align-items:center;gap:4px}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}.tc.active{animation:fadeIn .2s ease}
+</style>
+</head>
+<body class="mode-classic">
+  <!-- v6.0 — Mode-specific renderer host. Red and Blue modes mount their layouts here
+       and hide the classic content tree below. Classic mode hides this wrapper and shows
+       the original UI (headers, stats, tabs, panels) verbatim. Single source of truth for
+       the mode swap so we never have to touch the existing v5.9 markup. -->
+  <div id="modeHost" style="display:none"></div>
+  <div class="hdr">
+    <div class="hdr-l"><div class="logo">P</div><div class="title">Pen<em>Scope</em><span class="ver">v6.0</span></div></div>
+    <div class="hdr-r">
+      <div class="mode-toggle" role="tablist" aria-label="View mode">
+        <button class="mode-seg v6-focusable" id="modeClassic" role="tab" aria-selected="true" data-mode="classic" aria-label="Classic mode — original PenScope view">Classic</button>
+        <button class="mode-seg v6-focusable" id="modeRed" role="tab" aria-selected="false" data-mode="red" aria-label="Red mode — chain-first attacker view">Red</button>
+        <button class="mode-seg v6-focusable" id="modeBlue" role="tab" aria-selected="false" data-mode="blue" aria-label="Blue mode — defender health dashboard">Blue</button>
+      </div>
+      <div class="deep-wrap">
+        <button class="btn btn-deep" id="btnDeep" style="border-radius:8px 0 0 8px">Deep</button>
+        <button class="deep-drop-btn" id="btnDeepDrop">▾</button>
+        <div class="deep-menu" id="deepMenu">
+          <div class="deep-item" id="deepOptToggle">🔍 Toggle Deep Mode</div>
+          <div class="deep-item" id="deepOptSourceMaps">🗺️ Source Map Scanner</div>
+        </div>
+      </div>
+      <div class="deep-wrap">
+        <button class="btn btn-probe" id="btnProbe" title="Probe — sends requests (bug bounty mode)" style="border-radius:8px 0 0 8px">Probe</button>
+        <button class="deep-drop-btn" id="btnProbeDrop" style="border-color:rgba(255,123,58,.3)">▾</button>
+        <div class="deep-menu" id="probeMenu" style="min-width:300px">
+          <div class="deep-item" data-aggro="careful" style="color:var(--green)">🟢 Careful — GET only, read-only</div>
+          <div class="deep-item" data-aggro="medium" style="color:var(--yellow)">🟡 Medium — test auth, no modifications</div>
+          <div class="deep-item" data-aggro="full" style="color:var(--red)">🔴 Full Send — test everything</div>
+          <div style="padding:8px 10px;border-top:1px solid var(--glassbrd);margin-top:4px">
+            <div style="font-size:9px;color:var(--t3);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Custom Headers</div>
+            <textarea id="probeHeaders" placeholder="Authorization: Bearer xxx&#10;X-API-Key: abc123&#10;X-Forwarded-For: 127.0.0.1" spellcheck="false" style="width:100%;min-height:60px;background:var(--glass2);border:1px solid var(--glassbrd);border-radius:6px;padding:6px 8px;color:var(--t1);font-family:var(--mono);font-size:10px;resize:vertical;outline:none;box-sizing:border-box"></textarea>
+            <div style="font-size:8px;color:var(--t3);margin-top:3px">Added to every probe request. One per line (Name: Value). Saved automatically.</div>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+              <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t2);cursor:pointer"><input type="checkbox" id="probeRecursive" checked style="accent-color:var(--orange)"> Smart recursive probing</label>
+              <span style="font-size:8px;color:var(--t3);margin-left:auto">Discovers APIs → probes them → extracts more APIs</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+              <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t2);cursor:pointer"><input type="checkbox" id="probeStealth" style="accent-color:var(--green)"> Stealth mode</label>
+              <span style="font-size:8px;color:var(--t3);margin-left:auto">Jitter + random pauses to evade WAFs</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <button class="btn" id="btnExport">Export ▾</button>
+      <div class="exp-menu" id="exportMenu"><div class="exp-item" data-fmt="json">JSON (full data)</div><div class="exp-item" data-fmt="report">📄 Full Report (.md)</div><div class="exp-item" data-fmt="burp">Burp URL list</div><div class="exp-item" data-fmt="wordlist">Param wordlist</div><div class="exp-item" data-fmt="endpoints">Endpoints (txt)</div><div class="exp-item" data-fmt="swagger">🔧 Swagger Spec (.yaml)</div><div class="exp-item" data-fmt="sourcemaps">🗺️ Source Maps (JSON)</div><div class="exp-item" data-fmt="nuclei">⚔️ Nuclei Templates (.yaml)</div><div class="exp-item" data-fmt="har-import" style="border-top:1px solid var(--glassbrd);margin-top:4px;padding-top:8px;color:var(--teal)">📥 Import HAR...</div></div>
+      <button class="btn" id="btnClear">Clear</button>
+      <button class="btn btn-main" id="btnScan">⟳ Scan</button>
+      <button class="btn btn-claude" id="btnClaude">→ Claude</button>
+    </div>
+  </div>
+  <!-- v6.0 — Target URL bar lives OUTSIDE classicHost so it's visible in every mode.
+       Users always need to see what URL is being analyzed; hiding it in red/blue would
+       be a UX regression. -->
+  <div class="tgt"><div class="dot"></div><span style="font-weight:600;letter-spacing:.3px">TARGET</span><span class="tgt-url" id="tgtUrl">—</span></div>
+  <!-- v6.0 — Classic UI tree. Identical to v5.9 markup; wrapped only so renderRed/renderBlue
+       can hide the entire classic surface in one operation. ID `classicHost` is the only
+       new ID; nothing inside changed. -->
+  <div id="classicHost">
+  <div class="deep-bar" id="deepBar"><div class="dp"></div>Deep mode — response bodies, auth headers, runtime, route discovery, script grep, WASM analysis, WebRTC leaks, BroadcastChannel, COOP/COEP</div>
+  <div class="deep-bar" id="probeBar" style="background:rgba(255,123,58,.04);border-bottom-color:rgba(255,123,58,.1)"><div class="dp" style="background:var(--orange);box-shadow:0 0 8px rgba(255,123,58,.6)"></div><span id="probeStatus">Probe — source maps, GraphQL, swagger, BAC, CORS, WS hijack, cache poison, timing oracle, COOP/COEP bypass</span></div>
+  <div class="stats">
+    <div class="st"><div class="st-n" style="color:var(--blue)" id="sE">0</div><div class="st-l">Endpoints</div></div>
+    <div class="st"><div class="st-n" style="color:var(--red)" id="sS">0</div><div class="st-l">Secrets</div></div>
+    <div class="st"><div class="st-n" style="color:var(--yellow)" id="sH">0</div><div class="st-l">Hidden</div></div>
+    <div class="st"><div class="st-n" style="color:var(--orange)" id="sI">0</div><div class="st-l">Issues</div></div>
+    <div class="st"><div class="st-n" style="color:var(--purple)" id="sD">0</div><div class="st-l">Deep</div></div>
+  </div>
+  <div class="tabs">
+    <div class="tab active" data-t="endpoints">Endpoints <span class="b" id="bE">0</span></div>
+    <div class="tab" data-t="secrets">Secrets <span class="b" id="bS">0</span></div>
+    <div class="tab" data-t="hidden">Hidden <span class="b" id="bH">0</span></div>
+    <div class="tab" data-t="headers">Headers <span class="b" id="bI">0</span></div>
+    <div class="tab" data-t="forms">Forms <span class="b" id="bF">0</span></div>
+    <div class="tab" data-t="tech">Tech <span class="b" id="bT">0</span></div>
+    <div class="tab" data-t="storage">Storage <span class="b" id="bSt">0</span></div>
+    <div class="tab" data-t="links">Links <span class="b" id="bL">0</span></div>
+    <div class="tab deep-tab" data-t="deep">Deep <span class="b" id="bD">0</span></div>
+    <div class="tab deep-tab" data-t="console">Console <span class="b" id="bC">0</span></div>
+  </div>
+  <div class="tc active" id="t-endpoints"><div class="flt"><input id="fE" placeholder="Filter... (path, method, status, tag)"></div><div id="rE"></div></div>
+  <div class="tc" id="t-secrets"><div id="rS"></div></div>
+  <div class="tc" id="t-hidden"><div id="rH"></div></div>
+  <div class="tc" id="t-headers"><div id="rI"></div></div>
+  <div class="tc" id="t-forms"><div id="rF"></div></div>
+  <div class="tc" id="t-tech"><div id="rT"></div></div>
+  <div class="tc" id="t-storage"><div id="rSt"></div></div>
+  <div class="tc" id="t-links"><div class="flt"><input id="fL" placeholder="Filter links..."></div><div id="rL"></div></div>
+  <div class="tc" id="t-deep">
+    <div style="display:flex;gap:6px;padding:6px 16px;align-items:center;border-bottom:1px solid var(--glassbrd)">
+      <input id="fD" placeholder="Filter Deep findings..." style="flex:1;background:var(--glass);backdrop-filter:blur(10px);border:1px solid var(--glassbrd2);border-radius:8px;padding:6px 10px;color:var(--t1);font-family:var(--mono);font-size:10px;outline:none">
+      <button class="btn" id="dExpAll" title="Expand all sections" style="font-size:9px;padding:4px 8px">⊕ All</button>
+      <button class="btn" id="dColAll" title="Collapse all sections" style="font-size:9px;padding:4px 8px">⊖ All</button>
+    </div>
+    <div id="rD"></div>
+  </div>
+  <div class="tc" id="t-console"><div class="flt"><input id="fC" placeholder="Filter console logs..."></div><div id="rC"></div></div>
+  </div><!-- /classicHost -->
+  <div class="toast" id="toast">Copied!</div>
+  <div class="ftr"><span id="fTime">—</span><span id="footerLabel">PenScope v6.0 — Classic mode (v5.9 verbatim) · Red/Blue modes available</span></div>
+  <div class="smap-overlay" id="smapOverlay">
+    <div class="smap-panel">
+      <div class="smap-title">🗺️ Source Map Scanner</div>
+      <div class="smap-sub" id="smapStatus">Scanning...</div>
+      <div id="smapResults"></div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="smap-dl" id="smapDownloadAll" style="display:none;padding:6px 14px;font-size:11px">📥 Download All Found</button>
+        <button class="smap-close" id="smapClose">Close</button>
+      </div>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

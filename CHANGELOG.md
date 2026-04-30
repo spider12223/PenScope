@@ -1,0 +1,479 @@
+# PenScope Changelog
+
+## v6.0.0 — Red Team / Blue Team / Classic Modes
+
+The biggest release yet. v6.0 adds two new view modes — **Red** for offense, **Blue**
+for defense — over the same data engine, while preserving every line of v5.9
+functionality byte-for-byte in **Classic** mode. One engine, three views.
+
+### Mode router
+
+A new 3-segment pill in the popup header switches between **Classic**, **Red**, and
+**Blue**. Mode is persisted per-tab via `chrome.storage.session` (survives SW
+restarts) and via the existing `markDirty` pipeline. Theme swap rides on CSS variable
+overrides under `body.mode-red` / `body.mode-blue` — no rule selector changes, so
+classic mode is verbatim v5.9.
+
+`tab.mode` defaults to `'classic'`. The data engine is identical across all three
+modes; only the renderer changes.
+
+### Red mode — chain-first attacker view
+
+- **Exploit chain rail at top**, sorted by `severity × confidence`. Each chain
+  expands in-place to a weaponize panel with five action buttons.
+- **Weaponize buttons** — `Copy curl`, `Nuclei YAML`, `Burp request`, `Draft H1
+  report`, `Send to Claude queue`. Each copies the right artefact to clipboard
+  with a toast.
+- **Claude bidirectional sync** — existing `→ Claude` button still pushes findings
+  out. New `⟳ Sync from Claude` reads clipboard, parses a fenced
+  ```` ```penscope-queue ```` JSON block, validates the shape, and persists to
+  `tab.claudeQueue`. A banner appears with `Run queue ▶` to fire each attack via
+  page-context fetch with current custom headers + stealth.
+- **Stack-aware attack packs** — when `tab.mode === 'red'` and probe runs after step
+  36, walks `tab.techStack` and runs matching packs (Laravel, Spring, Rails, ASP.NET,
+  Django, Next.js, GraphQL, WordPress). 8 stacks, 40+ steps total. Findings land in
+  `tab.stackAttacks` and feed Chain 13 (stack-specific RCE surface).
+- **Reference accordion** — the 10 classic tabs render as collapsed sections below
+  the chain rail. Expanding moves the actual rendered DOM into the section so click
+  handlers and filter inputs continue to work.
+
+### Blue mode — defender health dashboard
+
+- **Health score** — 0-100, computed from severity-weighted finding counts:
+  `score = max(0, 100 - (crit*15 + high*7 + med*3 + low*1))`. Live trend arrow
+  vs. last snapshot.
+- **Top-5 fixes this sprint** — prioritized by `severity × ease`. Each fix has a
+  panel with copy-pasteable snippets in language tabs (raw / Nginx / Apache / IIS /
+  Express / Django / Laravel / Rails / ASP.NET — only the variants the entry
+  defines). 30+ fix entries covering every finding type.
+- **Mark as fixed** — finding gets removed from health-score calc and top-5 list
+  until the next scan disagrees. Persisted in `tab.markedFixed`.
+- **Generate CSP** — observed-traffic CSP builder. Walks `tab.endpoints` by
+  resource type, derives source allowlists, adds tight defaults
+  (`default-src 'none'`, `frame-ancestors 'none'`, `base-uri 'self'`,
+  `form-action 'self'`, `upgrade-insecure-requests`). Detects inline
+  scripts / `eval()` and warns when `'unsafe-inline'` or `'unsafe-eval'` had to be
+  kept. Diff against current CSP shows tightened/loosened/added directives.
+- **Compliance Audit** — coverage table across **7 frameworks**: PCI-DSS v4, NESA
+  UAE IAS, SAMA CSF, DESC ISR, ISO 27001, OWASP Top 10 2021, CWE. Per-framework
+  coverage % + drill-down to violating findings. Exports JSON (SIEM-ingestable)
+  and PDF (clean print stylesheet via `window.print()`).
+- **Snapshot + Compare** — captures current findings + chains under the host's
+  `chrome.storage.local` bucket (FIFO, 20 per host). Diff identifies
+  `new`/`resolved`/`unchanged` by stable finding ID. Diff Markdown export.
+- **Continuous monitor** — toggle uses `chrome.alarms` (5 min interval). Each tick
+  re-extracts secrets from the live tab and fires a `chrome.notifications` toast
+  when new ones appear. Requires `notifications` + `alarms` permissions added to
+  manifest v6.
+
+### New chain pattern (Chain 13)
+
+`analyzeExploitChains` now emits **stack-specific RCE surface** chains when
+`tab.stackAttacks` contains critical/high hits. Confidence weights up when admin
+endpoints + secrets in scope.
+
+### New files
+
+- `red-attacks.js` — canonical `STACK_ATTACK_PACKS` reference (live copy inlined
+  in `background.js`)
+- `blue-fixes.js` — canonical `FIX_SNIPPETS` reference (live copy inlined in
+  `popup.js`)
+- `blue-csp.js` — canonical `generateTightCSP` reference (live copy inlined in
+  `popup.js`)
+- `blue-compliance.js` — canonical `COMPLIANCE_MAP` reference (live copy inlined
+  in `popup.js`)
+
+### Architecture notes
+
+- **Zero new dependencies.** No npm install, no CDN scripts, no build step. All
+  new modules are pure vanilla JS; the canonical reference files double as
+  external-tooling-readable copies.
+- **Mode-router contract**: `setMode(mode)` validates → swaps body class → persists
+  to background → calls `rerender()` which dispatches to `renderClassic` /
+  `renderRed` / `renderBlue`. Each renderer manages `classicHost` / `modeHost`
+  visibility.
+- **Reference accordion DOM portage**: Red/Blue mode borrow the actual classic
+  rendered nodes (rather than re-rendering or cloning) so listeners stay live.
+  Borrowed nodes return to their hidden classic home on collapse.
+- **Stack pack fire-and-forget**: runs after probe step 36 finishes; doesn't block
+  the probe resolve. `markDirty` fires when packs complete so the popup picks up
+  results on the next `getData`.
+- **Stable finding hash**: tiny FNV-1a 32-bit. Both `popup.js#stableHash` and
+  `background.js#snapStableHash` use the same algorithm so cross-process diffs
+  match the same finding to the same ID.
+- **No `localStorage`/`sessionStorage` from popup**: snapshots use
+  `chrome.storage.local`; mode + queue use the existing `markDirty` →
+  `chrome.storage.session` path.
+- **Accessibility**: 4.5:1 contrast across all three themes, `:focus-visible`
+  outlines on every new interactive element, `role="tablist"` + `aria-selected`
+  on the mode toggle, `aria-expanded` on accordions, 44×44 minimum touch
+  targets.
+
+## v5.9.0 — Attack Chains + 6 New Attacks + Real Stealth
+
+The release built specifically to push PenScope from "cool but rough" to "best-in-class."
+
+### Attack Chain Correlator — the headline feature
+
+New `analyzeExploitChains()` engine walks the entire tab state looking for **compound findings**
+where multiple signals combine into something worse than any individual bug. 12 chain patterns:
+
+1. **Auth bypass on sensitive endpoint** — probe-confirmed missing auth + path name suggests
+   admin/user/billing/config
+2. **Destructive BAC** — BAC-vulnerable endpoint with destructive naming (delete/remove/purge)
+3. **CSRF-vulnerable GraphQL mutation** — confirmed missing CSRF + it's a mutation, not a query
+4. **Exposed auth token + live API** — JWT/Bearer in memory + matching /api/ endpoints
+5. **Confirmed IDOR with sensitive data** — same-skeleton response after ID substitution
+6. **CORS reflection WITH credentials** — full SOP bypass
+7. **Open redirect on auth flow** — redirect param on /oauth, /login, /callback
+8. **Hidden admin routes** — 3+ admin paths in code never observed in traffic
+9. **JWT alg=none accepted** — server trusts unsigned tokens
+10. **Source map leaked secrets** — production shipped .map files with hardcoded secrets
+11. **WebRTC internal IP leak** — private IPs exposed via STUN
+12. **Recursive probe findings cluster** — 3+ sensitive findings across multiple endpoints
+
+Each chain includes a **severity**, **summary**, **reproduction command**, **next steps**, and
+**confidence score**. Sorted by severity × confidence. Rendered at the **TOP of the Deep tab**
+(the literal first thing you see) and the **TOP of every Claude report**. This is what a
+hunter reads first.
+
+### 6 new probe attack vectors (Steps 31-36)
+
+- **Step 31: Parameter Discovery** — brute-forces 38 hidden parameter names (`debug`, `admin`,
+  `verbose`, `_method`, `role`, `bypass`, etc.) on observed GET endpoints. Compares response size
+  to baseline. If response changes by >50 bytes, flags the parameter as potentially meaningful.
+  **This finds debug flags APIs forgot to remove.**
+- **Step 32: SSTI Probing** — injects `{{7*7}}`, `${7*7}`, `<%=7*7%>`, `#{7*7}`, `{{7*'7'}}`,
+  `${{7*7}}` into query parameters. If the response contains the evaluated result (`49`,
+  `7777777`) without the original payload, we have confirmed template injection — critical
+  severity, usually RCE.
+- **Step 33: XXE Probing** — POSTs XML with external entities to endpoints accepting
+  `application/xml`. If the entity is reflected in the response, XXE is confirmed. Also flags
+  endpoints that parse XML without error for potential OOB exploitation.
+- **Step 34: CRLF Injection** — injects `%0d%0aX-PenScope-Injected:%20true` into redirect
+  parameters. Checks response headers for the injected header. Enables response splitting,
+  session fixation, and cache poisoning.
+- **Step 35: API Version Downgrade** — actively probes older versions (v1, v2) for every
+  observed `/vN/` endpoint. Older API versions often lack modern auth/validation.
+- **Step 36: Proto Pollution Exploitation** — injects `__proto__` and `constructor.prototype`
+  into JSON request bodies. Detects reflection of polluted attributes in responses and flags
+  500 responses as potential triggers.
+
+**Total probe attack count: 36 (was 30 in v5.8).**
+
+### Real stealth mode
+
+v5.8's stealth was jitter only. v5.9 adds actual **randomization**:
+
+- `shuf()` Fisher-Yates shuffle helper (stealth-mode only, no-op otherwise)
+- **Step 5 path order shuffled** — `/admin, /.env, /.git` are no longer probed in alphabetic
+  order. Attacker signature of "sequential scan of admin endpoints" becomes much harder to match.
+- **Step 7 prefix × suffix order shuffled** — both arrays randomized. The suffix brute no longer
+  produces the same request sequence twice.
+- **Per-request micro-jitter** — on top of the per-step delay, every 3rd request gets an
+  additional 0-150ms random pause. Breaks timing-based detection.
+
+### Severity weighting extended to more scanners
+
+v5.8 applied `weighSeverity()` to one scanner. v5.9 extends it to `deepScanBody()` — the
+heaviest pattern scanner in the codebase, run on every captured API response body. Findings are
+now upgraded/downgraded based on:
+
+- **In authenticated API path** → +1 severity
+- **In comment/documentation** → -1 severity
+- **Value looks like test data** (`john.doe`, `example.com`, `lorem`) → -1 severity
+- **Value is a live-looking JWT** (three base64 parts) → +1 severity
+
+### Architecture notes
+
+- `analyzeExploitChains` runs inside `runPassiveAnalysis` on every `getData` call, so chains are
+  always fresh. No chain pattern can miss findings added by later pipeline stages.
+- The 6 new probe steps share the existing `sf()`, `mergeCustomHeaders()`, and `delay()` helpers.
+  Zero new dependencies or helpers needed.
+- State additions: `tab.exploitChains` (array). That's it. Everything else piggybacks on existing
+  state fields.
+- `R.paramDiscovery`, `R.sstiResults`, `R.xxeResults`, `R.crlfResults`, `R.versionDowngrade`,
+  `R.protoPollution` added to the probe result object and rendered in the Deep tab under
+  "Probe Results."
+- `shuf()` is a zero-effect no-op when `ctx.stealth` is false, so non-stealth runs are unchanged.
+
+## v5.8.0 — Stealth, Persistence, HAR Import, Nuclei Export, UX polish
+
+This release addresses every issue I identified in my own 7.5/10 rating. **No features were
+removed** — every v5.7 capability is preserved and extended.
+
+### Stealth mode for probing
+
+New checkbox in the probe dropdown. When enabled:
+- `delay()` adds 0–80% jitter to every inter-step pause, breaking up the probe's cadence
+- Every 10 requests, a 200–800ms random pause is injected
+- Persisted to `chrome.storage.local` so it survives across sessions
+
+Result: WAFs that pattern-match rapid sequential scans (e.g. `/admin`, `/.env`, `/.git` HEADs in
+sequence) see a much more organic-looking request pattern. Turns a 10-of-10 signature into a 3-of-10.
+
+### Session persistence (chrome.storage.session)
+
+Background state is now periodically serialized to `chrome.storage.session`, which survives
+service worker restarts (but clears on browser close, which is the correct lifetime for a recon
+tool). The debounced `markDirty()` / `flushDirty()` pipeline trims large arrays before writing to
+stay under the quota:
+
+| Field                | Cap  |
+|----------------------|------|
+| endpoints            | 500  |
+| apiResponseBodies    | 60   |
+| postBodies           | 100  |
+| discoveredRoutes     | 800  |
+| scriptSources        | 300  |
+| consoleLogs          | 150  |
+| perfEntries          | 200  |
+| headerIntel          | 150  |
+
+On service worker startup, `restoreStateOnStartup()` reads every `ps:tab:*` key back into the
+in-memory `state` object and rebuilds the `endpointIndex` Map from the serialized endpoints.
+Previously every 5-minute idle wiped your findings — now they survive.
+
+`chrome.tabs.onRemoved` removes the corresponding session storage entry so closed tabs don't
+accumulate.
+
+### Deep tab filter + collapsible sections
+
+The Deep tab (the tab with 40+ data sections) now has:
+
+- **Live filter input**: substring-matches across every rendered section. Hides sections that
+  don't contain the query, shows everything when cleared.
+- **Clickable section titles**: every `.hs-t` title is now a toggle that collapses/expands its
+  section. Collapsed state is tracked in a `_collapsedSections` Set so it survives re-renders.
+- **⊕ All / ⊖ All buttons**: one-click expand-all or collapse-all for rapid triage.
+- **Visual affordances**: collapsed sections show `▸` instead of `▾` and dim their title.
+
+CSS rules ensure the collapse respects the existing section nesting (source map trees, grouped
+headers, etc.) without breaking any existing click handlers (data-copy, data-toggle, data-dlmap,
+data-decodeidx). Interactive elements inside titles are explicitly ignored by the collapse click
+handler.
+
+### Nuclei template export
+
+New "⚔️ Nuclei Templates (.yaml)" export option generates a multi-document YAML file with one
+template per high-severity finding class:
+
+1. **Broken Access Control** — probe BAC hits → access-control templates
+2. **Auth Removal** — endpoints returning 200 without credentials → broken-auth templates
+3. **IDOR** — auto-test hits with confirmed ID substitution → idor templates
+4. **CORS reflection** — reflected origins (especially with credentials) → cors templates
+5. **Open Redirects** — redirect parameters that accept `evil.com` → open-redirect templates
+6. **CSRF validation gaps** → csrf templates
+7. **Method tampering** — endpoints that accept unexpected verbs → method-override templates
+8. **Secret exposure** — recursive-probe findings → word-match sensitive-data templates
+
+Output is directly usable with `nuclei -u <target> -t ./penscope_<host>_nuclei.yaml`. Each template
+includes the PenScope detection as a reference so findings can be cross-validated.
+
+### HAR import
+
+New "📥 Import HAR..." option. User selects a Burp/ZAP/DevTools HAR capture (`.har` or `.json`),
+and the background `importHar` handler replays every entry into state:
+
+- **Endpoints** added with method, status, size, host, tags
+- **Query params** extracted
+- **POST bodies** captured with content-type detection and JSON body param extraction
+- **Auth headers** (Authorization, X-API-Key, X-Auth-Token, Cookie, etc.) captured
+- **Response bodies** scanned through the full `scanResponseBody` + `deepScanBody` pipeline
+- **JS files** grep'd via `scanScriptViaNetwork` for endpoints and secrets
+- **Security headers** analyzed via `analyzeCSP` for the main frame
+
+This decouples PenScope from "must have a live tab" — you can analyze captures from other tools,
+share scans between team members, or run post-hoc analysis on historical traffic. File size cap
+is 50MB and entry cap is 5000.
+
+### Severity confidence weighting
+
+New `weighSeverity(baseSev, context)` helper + `looksLikeTestValue(v)` heuristic. Findings now get
+upgraded or downgraded based on where they were found:
+
+- **+1 severity**: in cookie / auth header / authenticated API response
+- **+1 severity**: value looks like a live JWT (three base64 parts)
+- **-1 severity**: in a code comment or TODO
+- **-1 severity**: stack trace / SQL error on a 2xx response (likely a log, not a real error)
+- **-1 severity**: value matches test patterns (`test@`, `example.com`, `john.doe`, `lorem`, etc.)
+
+Applied to `scanResponseBody()` — the noisiest regex scanner in the codebase. Other scanners
+retain their existing severity until the next refinement pass.
+
+### Architecture notes
+
+- **No breaking changes**: `runProbe` signature gained a 5th parameter (`stealth`) but remains
+  backward compatible — missing args default to false.
+- **State restoration**: happens at module load via `restoreStateOnStartup()` which reads
+  `chrome.storage.session` and rebuilds `state[tabId]` + `endpointIndex` Maps (which don't
+  serialize). Runs before any message handler could be invoked.
+- **Debounced persistence**: `markDirty(tabId)` is called from `getData` and probe result merging.
+  The 5-second debounce + 5-second timer means a rapid sequence of updates produces at most one
+  write per tab per 5 seconds.
+- **Deep tab filter scope**: applies to top-level `.hs` sections only. Sub-sections collapsed by
+  existing `data-toggle` handlers are respected independently.
+
+## v5.7.0 — Custom Headers + Smart Recursive Probing
+
+### The headline feature: recursive API discovery
+
+PenScope already discovered endpoints from source maps, swagger specs, GraphQL introspection, and
+JS grep — but never actually *called* them. v5.7 adds a three-wave recursive probe (`Step 30`) that
+closes the loop:
+
+- **Wave 1**: Seeds every unobserved endpoint from swagger paths, source-map endpoints, suffix-brute
+  hits, well-known probes, GraphQL introspection, and passively discovered routes. Filters out
+  templated paths, static assets, and destructive endpoints (the last gated on `aggroLevel="full"`).
+  GETs each one, captures the response, scans for secrets/tokens/PII, and extracts new URLs
+  referenced inside the response body.
+- **Wave 2**: Takes every URL that Wave 1 extracted from response bodies and probes those. More
+  responses → more URL extraction → more findings.
+- **Wave 3**: One more pass using URLs discovered in Wave 2. Hard budget caps prevent runaway.
+
+Per-wave budgets scale with aggro level:
+| Level   | Wave 1 | Wave 2 | Wave 3 | Total |
+|---------|--------|--------|--------|-------|
+| careful | 20     | 15     | 10     | 45    |
+| medium  | 40     | 25     | 15     | 80    |
+| full    | 60     | 40     | 25     | 125   |
+
+Findings inside recursive responses **bubble up into the main Secrets tab**. Discovered URLs
+**bubble up into the Discovered Routes list**. The recursive layer isn't a parallel silo — it feeds
+everything back into the main data model so the final Claude report and exports include it.
+
+Bonus: **GraphQL query field probing**. When introspection succeeds in Step 1, Wave 1 also POSTs
+`{query:"{fieldName{__typename}}"}` for each introspected query field to discover which ones are
+reachable without arguments or auth — exposing data that normally requires construction of a full
+query body.
+
+### Custom headers
+
+New textarea in the probe dropdown menu. User pastes:
+
+```
+Authorization: Bearer eyJhbGc...
+X-API-Key: abc123
+X-Forwarded-For: 127.0.0.1
+```
+
+Parsed on probe start (one header per line, `Name: Value` format, `#` lines are comments), merged
+into **every** probe request via a new `mergeCustomHeaders()` helper in the probe eval. User headers
+win over any default probe headers (e.g., if the probe sends `Content-Type: application/json` but
+the user specifies `Content-Type: application/xml`, the user's value is used).
+
+Headers are persisted to `chrome.storage.local` — type them once, they survive across sessions.
+`credentials: "include"` is always set so session cookies + custom `Authorization` headers both
+flow through. The "smart recursive probing" toggle is also persisted.
+
+### Stronger findings scanner
+
+New `scanBodyForFindings()` helper inside the probe eval runs on every recursive response with a
+20-pattern detector: auth tokens, API keys, passwords, internal IDs, emails, phones, internal URLs,
+AWS ARNs, private keys, Stripe/GitHub/AWS/Google keys, hardcoded JWTs, credit cards, SSNs, stack
+traces, SQL errors, admin flags, role/scope fields. Findings auto-promote into `tab.secrets` with
+proper severity tagging and a `recursive:<path>` source attribution.
+
+### Architecture notes
+
+- **Probe eval function helpers**: `mergeCustomHeaders`, `extractUrlsFromBody`, `scanBodyForFindings`
+  are defined near the top of the probe eval IIFE so every step can call them. `sf()` and `probe()`
+  both merge custom headers via the new helper.
+- **URL extraction regex** matches path-only strings in common API prefixes (`/api/`, `/v1/`,
+  `/graphql`, `/rest/`, `/admin/`, `/internal/`, `/app/`, `/auth/`, `/user/`, `/account/`, `/public/`).
+  Static assets and templated paths are excluded. Capped at 50 URLs per body to prevent explosion.
+- **`shouldProbe()` filter** refuses already-observed paths, static assets, templated paths with
+  `{foo}` or `:bar` placeholders, and destructive endpoints outside `full` mode. Prevents wasted
+  requests and accidental DoS on the target.
+- **Feedback loop**: `runProbe()`'s result merge walks every wave's hits, pushes new discovered
+  routes into `tab.discoveredRoutes` (with per-wave source attribution), and pushes findings into
+  `tab.secrets` with `recursive:` source. The main Claude export and `/report` naturally include
+  everything because they read from the already-enriched state.
+- **New `runProbe` signature**: `runProbe(tabId, aggroLevel, customHeaders, recursive)`. Backward
+  compatible — missing params default to empty / enabled.
+
+## v5.6.0 — Correctness + Reconstruction
+
+### Critical fixes
+
+- **WASM / binary response body decoding (`Network.loadingFinished`)** — CDP returns non-UTF-8 bodies
+  (WASM, images, fonts, protobuf) with `result.base64Encoded = true`. The old handler treated every body
+  as plain text, silently corrupting pattern scans on binary content. WASM modules now decode
+  server-side via `processWasmBinary()`, extract toolchain signatures (Rust/Emscripten/AssemblyScript/
+  Go/LLVM), strings, crypto/mining indicators, magic bytes, and section counts — all without a
+  page-context re-fetch. Non-WASM binary bodies are skipped instead of corrupted.
+
+- **`mineMemoryStrings` anchored-regex miss** — the old scanner only matched values that were
+  *entirely* a secret (`val === "AKIA..."`). Real secrets almost always live embedded in headers,
+  nested JSON, cookie blobs, or stringified config. Rewritten to substring-scan, JSON.stringify
+  nested objects in one pass, walk 6 levels deep with a 300-finding cap, and check inline scripts,
+  data-* attributes, decoded-cookie values, and hidden inputs. Findings are promoted into the main
+  secrets list with proper severity tagging.
+
+- **SPA coverage snapshot never refreshed** — the old flow started `Profiler.startPreciseCoverage` on
+  the first `Page.frameNavigated`, took one snapshot at 10s after load, then disabled the profiler.
+  Client-side navigations produced zero new coverage data. Now: profiler stays running for the tab
+  lifetime; `Page.frameNavigated` (main-frame) triggers a merging snapshot (throttled to 10s) and a
+  re-run of runtime extraction (routes, stores, services, secrets) so SPA route changes reflect the
+  current state instead of the initial page.
+
+### New passive capabilities
+
+- **GraphQL operation extractor (`extractGraphQLOps`)** — parses every captured POST body for
+  `query`/`mutation`/`subscription` definitions, extracts operation name, type, selected fields,
+  variables (with sample values), fragments, and fragment definitions. Reconstructs a usable schema
+  from normal user traffic without needing `__schema` introspection. Rendered in the Deep tab, sorted
+  mutations first. Included in both Claude brief and Full Report exports.
+
+- **Symbol table (`buildSymbolTable`)** — aggregates the `names` array from every parsed source map
+  and flags identifiers matching admin/auth/token/secret/debug/bypass/role/privilege/internal
+  patterns. Surfaces the real pre-minification function/variable names that ordinarily require
+  downloading, parsing, and grepping source maps by hand. Colour-coded by risk category in the UI.
+
+- **Service Worker pattern detection** — added to `SCRIPT_PATTERNS` so any captured JS gets scanned
+  for `registerRoute`, cache strategies, fetch/push handlers, `caches.open/match/delete`,
+  `skipWaiting`, `clients.claim`, and `precacheAndRoute`. Reveals client-side proxy logic and cache
+  surface for stale-auth / cache-poisoning bug classes.
+
+- **Prototype pollution + postMessage wildcard patterns** — new `SCRIPT_PATTERNS` entries detect
+  `Object.assign(obj.__proto__)`, bracket-notation `__proto__` assignment, and
+  `.postMessage(data, "*")` wildcard targets in captured script sources.
+
+### Architecture notes
+
+- WASM binary analysis moved from a page-context `fetch()` + template-literal URL interpolation
+  (which had escaping hazards on URLs containing quotes/backslashes) to a pure server-side decode
+  from `Network.getResponseBody`. No page re-fetch, no injection surface.
+
+- `runPassiveAnalysis()` now calls `extractGraphQLOps()` and `buildSymbolTable()` on every `getData`
+  invocation so opening the popup picks up new GraphQL traffic + source maps without requiring a
+  re-scan.
+
+- `takeCoverageSnapshot()` split out from `runCoverageAnalysis()` so either function can be called
+  directly. The snapshot function is idempotent and does not disable the profiler.
+
+- Two new state fields on `T(tabId)`: `graphqlOps` and `symbolTable`. Both flow through `getData`
+  automatically and render in the Deep tab.
+
+## v5.5.0
+
+- WASM hex dump + crypto detect, WebGPU, WS hijack, cache poison, timing oracle, COOP/COEP bypass,
+  storage partition — 29 probe attack steps total.
+
+## v5.4.0
+
+- gRPC + WebAssembly + WebRTC leaks + BroadcastChannel + WebAuthn + compression oracle.
+
+## v5.3.0
+
+- POST body capture + API response deep scan + coverage analysis + event listeners + Shadow DOM +
+  memory mining.
+
+## v5.2.0
+
+- IndexedDB + CacheStorage + JWT decoder + route classification + permission matrix + IDOR test
+  generation.
+
+## v5.1.0
+
+- Full endpoint discovery + probe engine (22 attack steps).

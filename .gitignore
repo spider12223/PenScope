@@ -1,0 +1,39 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Node / npm (in case tooling ever lands)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# Chrome extension build artifacts
+*.zip
+*.crx
+*.pem
+web-ext-artifacts/
+dist/
+build/
+
+# Local test data / captures
+*.har
+*.pcap
+/scans/
+/test-captures/
+/.penscope-local/
+
+# Env / secrets
+.env
+.env.*
+secrets.json
+auth-tokens.txt
