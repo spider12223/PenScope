@@ -34,6 +34,22 @@ document.querySelectorAll(".mode-seg").forEach(btn=>{
     if(m)setMode(m);
   });
 });
+// v6.1 — Workbench button opens the standalone hunter workbench in a new Chrome tab.
+// Background creates the tab so the source tab ID is properly bound via URL params; the
+// workbench then operates on the captured target without leaving the active tab open.
+const btnWb=document.getElementById("btnWorkbench");
+if(btnWb){
+  btnWb.addEventListener("click",()=>{
+    if(!tabId){toast("No active tab");return;}
+    chrome.runtime.sendMessage({action:"wbOpen",tabId},r=>{
+      // Touch lastError so the dispatch doesn't log an unhandled warning when the SW
+      // is cold-starting or the message channel was closed before reply.
+      const err=chrome.runtime.lastError;
+      if(err){toast("Couldn't open Workbench: "+(err.message||"runtime error"));return;}
+      if(!r||!r.ok)toast("Couldn't open Workbench"+(r&&r.error?": "+r.error:""));
+    });
+  });
+}
 chrome.runtime.sendMessage({action:"runScan",tabId},()=>setTimeout(load,600));chrome.runtime.sendMessage({action:"getCookies",tabId});document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".tc").forEach(x=>x.classList.remove("active"));t.classList.add("active");document.getElementById(`t-${t.dataset.t}`).classList.add("active");}));document.getElementById("btnScan").addEventListener("click",()=>{chrome.runtime.sendMessage({action:"runScan",tabId},()=>setTimeout(load,800));});document.getElementById("btnClear").addEventListener("click",()=>{chrome.runtime.sendMessage({action:"clearData",tabId},()=>load());});document.getElementById("btnClaude").addEventListener("click",sendToClaude);document.getElementById("btnDeep").addEventListener("click",toggleDeep);const expBtn=document.getElementById("btnExport"),expMenu=document.getElementById("exportMenu");expBtn.addEventListener("click",e=>{e.stopPropagation();expMenu.classList.toggle("show");});document.addEventListener("click",()=>expMenu.classList.remove("show"));expMenu.querySelectorAll(".exp-item").forEach(i=>i.addEventListener("click",e=>{e.stopPropagation();exportData(i.dataset.fmt);expMenu.classList.remove("show");}));document.getElementById("fE").addEventListener("input",e=>renderEndpoints(D?.endpoints||[],e.target.value));document.getElementById("fL").addEventListener("input",e=>renderLinks(D?.links||[],e.target.value));document.getElementById("fC").addEventListener("input",e=>renderConsole(e.target.value));document.getElementById("btnProbe").addEventListener("click",toggleProbe);
 // Deep dropdown
 const deepDropBtn=document.getElementById("btnDeepDrop"),deepMenu=document.getElementById("deepMenu");

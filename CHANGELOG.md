@@ -1,5 +1,146 @@
 # PenScope Changelog
 
+## v6.1.0 — The Bug Bounty Workbench
+
+PenScope now ships with the same daily-driver tools that hunters pay $449/year for in
+Burp Suite Pro. Free, browser-native, faster startup, integrated with the existing
+chain correlator and stack-aware probe engine.
+
+The Workbench opens in a new Chrome tab (full-window real estate) and shares state
+with the popup via the existing message handler pipeline. Six sub-modules:
+
+### Repeater
+
+Capture any request, edit any field (method/URL/headers/body), resend, see the response.
+The single most-used Burp feature, in your browser. Send via Ctrl+Enter from any
+field. History rail keeps the last 50 requests; click to reload + re-render the
+captured response. **Copy as curl** turns any request into a one-liner you can paste
+into a terminal. **Send to Intruder** transfers the request as a fuzz template.
+**Send response to Diff** loads the body into the diff viewer.
+
+### Intruder
+
+Wordlist-based fuzzer with payload positions marked by `§...§`. Four attack modes
+matching Burp Pro:
+
+- **Sniper** — one position at a time, tries each payload in each marked position
+- **Cluster bomb** — cartesian product across all positions
+- **Pitchfork** — payloads paired in lockstep with positions (payload[i] → position[i])
+- **Battering ram** — same payload in every position
+
+Built-in payload library covering the daily hunter classics:
+
+| Set | Count | Use case |
+|---|---|---|
+| XSS | 40 | `<script>alert(1)</script>` and 39 modern variants |
+| SQLi | 30 | Boolean blind, error-based, time-based, UNION |
+| LFI | 28 | Path traversal across encodings + log poisoning |
+| SSTI | 18 | Jinja2, Twig, Freemarker, Velocity, Smarty |
+| SSRF | 22 | Localhost variants, cloud metadata endpoints, gopher/dict |
+| CmdInj | 24 | Bash, PowerShell, IFS bypass |
+| IDs 1-100 | 100 | For IDOR enumeration |
+| Auth bypass | 25 | `admin'--`, `' OR '1'='1`, role escalation |
+| Usernames | 25 | Common admin/test/service accounts |
+
+Or paste your own custom wordlist — overrides the built-in selection. Live result
+table with status code, response size, time, and an anomaly flag (★) when status or
+size differs from the baseline. Hard cap at 200 requests per attack to prevent
+accidental DoS.
+
+### Encoder / Decoder
+
+Round-trippable conversions for everything hunters touch:
+
+- Base64 (standard + URL-safe variants)
+- URL encode/decode
+- HTML entity encode/decode
+- Hex encode/decode
+- Hashes: MD5, SHA-1, SHA-256, SHA-512 (via SubtleCrypto, except MD5 which is a
+  compact RFC 1321 implementation since SubtleCrypto doesn't expose MD5)
+
+**JWT decoder + forger** as a dedicated card:
+- Paste any JWT, decode header + payload to JSON
+- Edit either, then **forge** a new token:
+  - **alg=none** — the classic JWT auth bypass (server trusts unsigned tokens)
+  - **HS256** — sign with a guessed weak secret (`secret`, `key`, `password`, `jwt-secret`)
+- Output is a copy-pasteable token
+
+### Diff Viewer
+
+Character-level… actually line-level. Paste two responses or send them from the
+Repeater. Click **Compute Diff** for an LCS-based diff (capped at 5000 lines per side
+for performance). Shows `+ added`, `- removed`, ` unchanged` lines with color coding
+and a summary `+N −M =K` count. Crucial for IDOR confirmation — does endpoint X
+return *the same* response for User A and User B?
+
+### Site Map
+
+Hierarchical tree of every observed endpoint, organized by host → path. Method pills,
+distinct response status codes shown as colored badges per node. Click any path to
+load it into the Repeater. Lets you see the full attack surface at a glance.
+
+### Auth Context Manager + Authorization Matrix
+
+The differentiator. **Save named auth profiles** — Anonymous, User A, User B,
+Admin, Internal Service — each with its own cookies + headers. Switch the active
+context with one click; every Repeater / Intruder / probe request uses the active
+context's credentials.
+
+**Run authorization matrix** kicks off the killer feature: PenScope walks every
+observed endpoint × every saved context, builds a color-coded grid:
+
+```
+                Anonymous    User A       User B       Admin
+GET /api/me     401          200          200          200
+GET /api/users  401          403          403          200
+GET /api/admin  401          403          403          200
+DELETE /users/5 405          403          403   ★      200
+```
+
+The ★ icon flags rows where contexts disagree on status code — those are your IDOR
+and BAC candidates. Burp doesn't ship this; it's standard-issue PenScope value.
+
+### Architecture
+
+- **Workbench is a standalone Chrome tab** — `chrome.runtime.getURL('workbench.html?source=<tabId>')`
+  opens in a new tab with full window real estate. Source tab ID flows through URL
+  search params so the workbench knows which tab to operate on.
+- **Page-context fetch** — `runWorkbenchRequest` uses `chrome.scripting.executeScript`
+  with `world: "MAIN"` to run requests in the source tab's context. `credentials:'include'`
+  picks up real session cookies; auth-context cookies are best-effort merged into
+  `document.cookie` before the request. HttpOnly cookies stay server-side as expected.
+- **Single named-function injection** — `__pageRunOneRequest` is the canonical runner.
+  Same pattern as `__pageRunStackAttacks` and `__pageRunClaudeQueue` from v6.0 (see the
+  dedicated comment in background.js for the MV3 CSP rationale).
+- **State is per-tab** — `repeaterHistory[]`, `authContexts[]`, `authActive` live in
+  `state[tabId]` and serialize via the existing `markDirty` pipeline. Snapshots of
+  the active tab survive SW restarts.
+- **No new dependencies** — all six modules are pure vanilla JS. The MD5 implementation
+  is ~50 lines of inlined RFC 1321. The LCS diff is ~30 lines. JWT signing uses
+  `crypto.subtle` natively.
+- **Permissions unchanged** — the Workbench needs no new permissions beyond what v6.0
+  already requested. `web_accessible_resources` added for `workbench.html`/`workbench.js`
+  so MV3 will let extension pages load the URL.
+
+### What this replaces in your toolkit
+
+| Burp feature | PenScope equivalent |
+|---|---|
+| Repeater | Workbench → Repeater |
+| Intruder (Sniper/Cluster/Pitchfork/Battering) | Workbench → Intruder (same 4 modes) |
+| Decoder | Workbench → Encoder (more codecs) |
+| Comparer | Workbench → Diff |
+| Target / Site map | Workbench → Site Map |
+| Burp Pro session handling rules | Workbench → Auth Contexts (better UX) |
+| Burp Pro Authorize-style extension | Workbench → Authorization Matrix (built-in, free) |
+| Active scanner | Probe engine (36 attacks + stack packs) |
+| Issue prioritization | Chain correlator (13 patterns, severity × confidence) |
+
+What Burp still has that PenScope doesn't (yet): TLS-level proxy interception (browser
+extensions can't), Collaborator out-of-band testing service, request smuggling lab,
+extension marketplace. Those come in future releases. Everything in a hunter's
+day-to-day workflow is now in PenScope.
+
 ## v6.0.0 — Red Team / Blue Team / Classic Modes
 
 The biggest release yet. v6.0 adds two new view modes — **Red** for offense, **Blue**

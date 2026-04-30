@@ -11,13 +11,13 @@
 
 ### **A Chrome extension that reads everything a website is doing — and tells you what to do about it.**
 
-![version](https://img.shields.io/badge/version-6.0.0-ff3a5c?style=for-the-badge)
+![version](https://img.shields.io/badge/version-6.1.0-ff3a5c?style=for-the-badge)
 ![manifest](https://img.shields.io/badge/manifest-v3-9b5aff?style=for-the-badge)
 ![deps](https://img.shields.io/badge/dependencies-0-3aff8a?style=for-the-badge)
 ![lines](https://img.shields.io/badge/LOC-10%2C000%2B-3aa8ff?style=for-the-badge)
 ![license](https://img.shields.io/badge/license-MIT-55556e?style=for-the-badge)
 
-**[Quick start](#quick-start) · [What it does](#what-it-does) · [The three modes](#the-three-modes) · [Under the hood](#under-the-hood)**
+**[Quick start](#quick-start) · [What it does](#what-it-does) · [The Workbench](#the-workbench) · [The three modes](#the-three-modes) · [Under the hood](#under-the-hood)**
 
 </div>
 
@@ -39,6 +39,8 @@ Then it shows you, in plain English:
 It's built for **bug bounty hunters**, **pentesters**, and **defenders** who want a fast read on a site without firing up Burp.
 
 > _"Reads everything, sends nothing — until you tell it to."_
+
+**v6.1 added the [Workbench](#the-workbench)** — Repeater, Intruder, Encoder, Diff, Site Map, and an Authorization Matrix tester. Same daily-driver tools you'd pay $449/year for in Burp Pro. Free, browser-native, faster startup.
 
 ---
 
@@ -67,6 +69,23 @@ This is what's new in v6.0. Same data engine, three different ways to look at it
 Switch modes with the **Classic / Red / Blue** pill in the popup header. Each tab remembers which mode you were last in.
 
 > The data engine is identical in every mode. Modes are theme + renderer choices over the same 60+ state fields. Classic mode is byte-for-byte the v5.9 experience.
+
+---
+
+## The Workbench
+
+Click **⌘ Workbench** in the popup header. A new Chrome tab opens with the full hunter toolkit — same daily-driver features Burp charges $449/year for, free and browser-native:
+
+| Tool | What it does |
+|---|---|
+| **Repeater** | Capture any request, edit any field, resend, see the response. Ctrl+Enter to fire. Copy as `curl`, send to Intruder, send to Diff. History rail keeps the last 50. |
+| **Intruder** | Wordlist fuzzer with `§...§` insertion points. 4 attack modes (Sniper / Cluster bomb / Pitchfork / Battering ram). 9 built-in payload sets covering XSS, SQLi, LFI, SSTI, SSRF, CmdInj, IDs, auth bypass, usernames. Live anomaly-flagged result table. |
+| **Encoder** | Round-trippable Base64 / URL / HTML / hex / hashes (MD5/SHA-1/SHA-256/SHA-512). Plus a JWT decoder + forger that signs `alg=none` for the classic auth bypass test, or HS256 with a guessed weak secret. |
+| **Diff** | Line-level LCS diff between two responses. Crucial for IDOR confirmation — does the endpoint return the same response for User A and User B? Color-coded `+` / `−` / `=` with a summary count. |
+| **Site Map** | Hierarchical tree of every observed endpoint, organized by host → path. Method pills, distinct status code badges per node. Click any path to load it into Repeater. |
+| **Auth Contexts** | Save named auth profiles (Anonymous, User A, User B, Admin), each with its own cookies + headers. One-click switch. **Run authorization matrix** then probes every endpoint × every context and color-codes the grid — disagreements = IDOR/BAC. |
+
+The Workbench shares state with the popup. Repeater history persists across SW restarts. Auth contexts persist per-tab.
 
 ---
 
@@ -403,19 +422,22 @@ The whole loop: PenScope → clipboard → Claude → clipboard → PenScope →
 
 ```
 PenScope/
-├── manifest.json          MV3 manifest, v6.0.0
-├── background.js          Service worker — webRequest, CDP, probe engine, chain analyzer (~5,900 lines)
-├── popup.html             UI — three modes, glassmorphism dark theme (~340 lines)
+├── manifest.json          MV3 manifest, v6.1.0
+├── background.js          Service worker — webRequest, CDP, probe engine, chain analyzer, workbench runners (~6,200 lines)
+├── popup.html             Popup UI — three modes, glassmorphism dark theme (~340 lines)
 ├── popup.js               Renderers, mode router, weaponize panels, fix snippets, compliance (~3,300 lines)
 ├── content.js             DOM scanning — secrets, hidden fields, forms, tech, XSS sinks (~684 lines)
 │
-├── red-attacks.js         Reference copy of STACK_ATTACK_PACKS (Laravel, Spring, Rails, ASP.NET, Django, Next.js, GraphQL, WordPress)
+├── workbench.html         Workbench UI shell — 6 sub-tab full-window app (~430 lines)
+├── workbench.js           Workbench logic — Repeater/Intruder/Encoder/Diff/SiteMap/AuthCtx (~830 lines)
+│
+├── red-attacks.js         Reference copy of STACK_ATTACK_PACKS (8 stacks: Laravel, Spring, Rails, ASP.NET, Django, Next.js, GraphQL, WordPress)
 ├── blue-fixes.js          Reference copy of FIX_SNIPPETS (30+ remediation snippets)
 ├── blue-csp.js            Reference copy of generateTightCSP
 ├── blue-compliance.js     Reference copy of COMPLIANCE_MAP (7 frameworks)
 │
 ├── icons/                 16, 48, 128 px PNG
-├── CHANGELOG.md           Full version history v5.1 → v6.0
+├── CHANGELOG.md           Full version history v5.1 → v6.1
 ├── LICENSE                MIT
 └── README.md              You are here
 ```

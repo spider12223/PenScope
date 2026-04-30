@@ -385,6 +385,12 @@ stackAttacks:[],
 // last snapshot for diff-based notifications).
 markedFixed:[],
 continuousMonitor:null,
+// v6.1 — Workbench state. Persisted across SW restarts via the existing markDirty
+// pipeline. Repeater history is capped at 50; auth contexts are unbounded but the UI
+// pages reasonably. authActive is a name into authContexts; "Anonymous" is implicit.
+repeaterHistory:[],
+authContexts:[{name:"Anonymous",cookies:{},headers:{},notes:"No auth — baseline for IDOR/BAC comparison"}],
+authActive:"Anonymous",
 startTime:Date.now()};}return state[tabId];}
 function seen(tabId,ns,key){const k=`${tabId}:${ns}`;if(!_seen[k])_seen[k]=new Set();if(_seen[k].has(key))return true;_seen[k].add(key);return false;}
 
@@ -5648,6 +5654,59 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse)=>{
     case "diffSnapshots":{
       diffSnapshotsForTab(msg.tabId,msg.host).then(r=>sendResponse({ok:true,...r})).catch(e=>sendResponse({ok:false,error:e.message||String(e)}));
       return true;}
+    // v6.1 — Workbench: get state bundle. Returns endpoints + auth contexts + repeater
+    // history in one call so the workbench can refresh without 3 round-trips.
+    case "wbGetState":{
+      const t=T(msg.tabId);
+      sendResponse({ok:true,
+        data:{endpoints:t.endpoints||[],techStack:t.techStack||[],probeData:t.probeData||null,exploitChains:t.exploitChains||[]},
+        auth:{active:t.authActive||"Anonymous",list:t.authContexts||[]},
+        history:t.repeaterHistory||[],
+      });
+      return true;}
+    // v6.1 — Workbench: send a request via page-context fetch. Merges active auth
+    // context's cookies + headers, then runs in the source tab so credentials:'include'
+    // picks up real session cookies (in addition to context-supplied ones).
+    case "wbSendRequest":{
+      const t=T(msg.tabId);
+      const ctxName=msg.req.ctxName||t.authActive||"Anonymous";
+      const ctx=(t.authContexts||[]).find(c=>c.name===ctxName)||{cookies:{},headers:{}};
+      runWorkbenchRequest(msg.tabId,msg.req,ctx).then(r=>{
+        sendResponse({ok:true,...r,ctxName});
+      }).catch(e=>sendResponse({ok:false,error:e.message||String(e)}));
+      return true;}
+    // v6.1 — Workbench: push a repeater history entry. Cap 50 entries (newest first).
+    case "wbHistoryPush":{
+      const t=T(msg.tabId);
+      if(!Array.isArray(t.repeaterHistory))t.repeaterHistory=[];
+      t.repeaterHistory.unshift(msg.entry);
+      if(t.repeaterHistory.length>50)t.repeaterHistory.length=50;
+      markDirty(msg.tabId);
+      sendResponse({ok:true,count:t.repeaterHistory.length});
+      return true;}
+    // v6.1 — Workbench: clear repeater history.
+    case "wbHistoryClear":{
+      const t=T(msg.tabId);
+      t.repeaterHistory=[];
+      markDirty(msg.tabId);
+      sendResponse({ok:true});
+      return true;}
+    // v6.1 — Workbench: persist auth contexts (full bundle write). Force an immediate
+    // flush — markDirty's 5-second debounce is too long for credentials the user just
+    // typed; if the SW dies in those 5 seconds, the contexts are gone. flushDirty()
+    // writes synchronously through chrome.storage.session before sendResponse fires.
+    case "wbAuthSave":{
+      const t=T(msg.tabId);
+      if(msg.auth&&Array.isArray(msg.auth.list))t.authContexts=msg.auth.list;
+      if(msg.auth&&typeof msg.auth.active==="string")t.authActive=msg.auth.active;
+      _dirtyTabs.add(msg.tabId);
+      flushDirty().then(()=>sendResponse({ok:true})).catch(e=>sendResponse({ok:false,error:e.message||String(e)}));
+      return true;}
+    // v6.1 — Workbench: open URL handler. Returns the workbench URL the popup uses.
+    case "wbOpen":{
+      const url=chrome.runtime.getURL("workbench.html")+"?source="+msg.tabId;
+      chrome.tabs.create({url}).then(t=>sendResponse({ok:true,tabId:t.id})).catch(e=>sendResponse({ok:false,error:e.message||String(e)}));
+      return true;}
     case "clearData":{const wasDeep=_debugTabs.has(msg.tabId);delete state[msg.tabId];if(_scripts[msg.tabId])_scripts[msg.tabId]=new Map();Object.keys(_seen).forEach(k=>{if(k.startsWith(`${msg.tabId}:`))delete _seen[k];});Object.keys(_pending).forEach(k=>{if(k.startsWith(`${msg.tabId}:`))delete _pending[k];});if(wasDeep)T(msg.tabId).deepEnabled=true;sendResponse({ok:true});return true;}
     case "reportContentScan":{const tabId=sender.tab?.id;if(tabId){const t=T(tabId);
       // Standard fields
@@ -5954,6 +6013,107 @@ async function __pageRunClaudeQueue(queue,customHeaders,stealth,baseUrl){
     }catch(e){out.push({attack:it,error:String(e&&e.message||e)});}
   }
   return out;
+}
+
+// v6.1 — Workbench request runner. Sends one request from the page context (so
+// credentials:'include' picks up real session cookies + the user's auth-context
+// cookies via document.cookie merge). Returns {status, headers{}, body, size, timeMs}.
+async function runWorkbenchRequest(tabId,req,ctx){
+  const headers=Object.assign({},ctx.headers||{},req.headers||{});
+  // Merge auth context cookies into Cookie header. The browser will also append its
+  // own cookies for the target origin via credentials:'include'; the manual merge
+  // forces context-specific overrides (e.g. testing with User A's cookies on a tab
+  // logged in as User B).
+  const ctxCookies=ctx.cookies||{};
+  if(Object.keys(ctxCookies).length){
+    const cookieStr=Object.entries(ctxCookies).map(([k,v])=>`${k}=${v}`).join("; ");
+    headers["Cookie"]=cookieStr;// note: most pages can't set Cookie via fetch; see runner for fallback
+  }
+  let results;
+  try{
+    const inj=await chrome.scripting.executeScript({
+      target:{tabId},world:"MAIN",
+      func:__pageRunOneRequest,
+      args:[req.method||"GET",req.url||"",headers,req.body||"",ctxCookies],
+    });
+    if(inj&&inj[0]&&inj[0].result)results=inj[0].result;
+  }catch(e){
+    try{
+      const inj2=await chrome.scripting.executeScript({
+        target:{tabId},
+        func:__pageRunOneRequest,
+        args:[req.method||"GET",req.url||"",headers,req.body||"",ctxCookies],
+      });
+      if(inj2&&inj2[0]&&inj2[0].result)results=inj2[0].result;
+    }catch(e2){throw e2;}
+  }
+  return results||{error:"no result"};
+}
+
+// Page-context single-request runner. Browsers forbid setting Cookie via fetch headers,
+// so we fall back to writing context cookies into document.cookie before the request,
+// then RESTORING the user's original cookies in a finally block — without restore, every
+// Repeater send would persist the auth-context cookies into the user's actual browsing
+// session on the target, potentially logging them in as the test user (privacy + safety
+// hazard). HttpOnly cookies aren't visible/writable from JS, so they're never touched.
+async function __pageRunOneRequest(method,url,headers,body,ctxCookies){
+  // Snapshot the JS-visible cookies BEFORE we touch anything. This is the state we'll
+  // restore the page to. HttpOnly cookies don't appear here (and can't be set from JS
+  // either), so they're invisible to this whole flow.
+  const originalCookies={};
+  document.cookie.split(";").forEach(c=>{
+    const [k,...rest]=c.trim().split("=");
+    if(k&&k.length)originalCookies[k.trim()]=rest.join("=");
+  });
+  // Track which cookie names we wrote so we know what to undo. Distinguish "we
+  // overwrote an existing cookie" from "we created a new one" so restore can either
+  // put the original back or expire ours.
+  const ourWrittenNames=[];
+  if(ctxCookies&&typeof ctxCookies==="object"){
+    Object.entries(ctxCookies).forEach(([k,v])=>{
+      if(!k)return;
+      try{
+        document.cookie=`${k}=${v}; path=/`;
+        ourWrittenNames.push(k);
+      }catch(e){/* setting blocked (e.g. opaque-origin) — silently skip */}
+    });
+  }
+  // Strip Cookie header — browsers reject this via fetch() anyway, but defensive.
+  const reqHeaders=Object.assign({},headers||{});
+  delete reqHeaders["Cookie"];
+  delete reqHeaders["cookie"];
+  const init={method:method.toUpperCase(),credentials:"include",headers:reqHeaders};
+  if(body&&init.method!=="GET"&&init.method!=="HEAD")init.body=body;
+  const t0=performance.now();
+  let result;
+  try{
+    const r=await fetch(url,init);
+    const dt=Math.round(performance.now()-t0);
+    let respText="";
+    try{respText=await r.text();}catch(e){respText="(body read error: "+String(e.message||e)+")";}
+    const respHeaders={};
+    r.headers.forEach((v,k)=>{respHeaders[k]=v;});
+    result={status:r.status,headers:respHeaders,body:respText.substring(0,50000),size:respText.length,timeMs:dt};
+  }catch(e){
+    result={error:String(e&&e.message||e),timeMs:Math.round(performance.now()-t0)};
+  }finally{
+    // CRITICAL: restore the page's original cookie state. Walk every name we wrote:
+    //   - if the name existed before, set it back to its original value
+    //   - if we created a new name, expire it (RFC 6265 — past expiration deletes)
+    // We can't perfectly preserve flags (HttpOnly was never visible; Secure flows from
+    // the page's origin scheme) — but we restore the visible value, which is what
+    // matters for the user's session continuity.
+    ourWrittenNames.forEach(k=>{
+      try{
+        if(k in originalCookies){
+          document.cookie=`${k}=${originalCookies[k]}; path=/`;
+        }else{
+          document.cookie=`${k}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+        }
+      }catch(e){/* best effort */}
+    });
+  }
+  return result;
 }
 
 async function __pageRunStackAttacks(items,headers,stealth,baseUrl,symbolHints){

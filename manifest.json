@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "PenScope",
-  "version": "6.0.0",
-  "description": "Red/Blue/Classic modes — chain-first attacker view + defender health dashboard + 36 probe attacks + stack-aware attack packs + observed-traffic CSP generator + 7-framework compliance audit + Claude bidirectional sync",
+  "version": "6.1.0",
+  "description": "Bug bounty workbench in Chrome — Repeater + Intruder + Encoder + Diff + Site Map + Auth Matrix + 36 probe attacks + chain correlator + Red/Blue/Classic modes. Free, faster than Burp.",
   "permissions": ["webRequest","activeTab","scripting","tabs","cookies","debugger","notifications","alarms","storage"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
@@ -11,5 +11,8 @@
     "default_icon": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
   },
   "content_scripts": [{ "matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_idle" }],
-  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "web_accessible_resources": [
+    { "resources": ["workbench.html","workbench.js"], "matches": ["<all_urls>"] }
+  ]
 }

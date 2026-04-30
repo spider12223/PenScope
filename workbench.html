@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PenScope Workbench</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+  :root {
+    --bg0: #06060a;
+    --bg1: rgba(14,14,22,.85);
+    --bg2: rgba(20,20,32,.7);
+    --glass: rgba(16,16,28,.55);
+    --glass2: rgba(24,24,40,.45);
+    --glass3: rgba(32,32,52,.35);
+    --glassbrd: rgba(255,255,255,.06);
+    --glassbrd2: rgba(255,255,255,.1);
+    --bgh: rgba(255,255,255,.03);
+    --t1: #eaeaf6;
+    --t2: #9898b8;
+    --t3: #55556e;
+    --red: #ff3a5c;
+    --orange: #ff7b3a;
+    --yellow: #ffc53a;
+    --green: #3aff8a;
+    --blue: #3aa8ff;
+    --purple: #9b5aff;
+    --teal: #3addc4;
+    --coral: #ff6b5a;
+    --pink: #ff5aaa;
+    --crit-bg: rgba(255,58,92,.1); --crit: #ff3a5c;
+    --high-bg: rgba(255,123,58,.1); --high: #ff7b3a;
+    --med-bg: rgba(255,197,58,.1); --med: #dda820;
+    --low-bg: rgba(58,168,255,.1); --low: #3aa8ff;
+    --info-bg: rgba(85,85,110,.1); --info: #55556e;
+    --glow-purple: 0 0 30px rgba(155,90,255,.15);
+    --font: 'Plus Jakarta Sans', -apple-system, sans-serif;
+    --mono: 'JetBrains Mono', 'SF Mono', monospace;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  html, body { height:100%; }
+  body {
+    background: var(--bg0);
+    background-image:
+      radial-gradient(ellipse at 10% 0%, rgba(155,90,255,.08) 0%, transparent 50%),
+      radial-gradient(ellipse at 90% 100%, rgba(255,58,92,.06) 0%, transparent 50%),
+      radial-gradient(ellipse at 50% 50%, rgba(58,168,255,.04) 0%, transparent 60%);
+    color: var(--t1);
+    font-family: var(--font);
+    font-size: 12px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Header */
+  .hdr {
+    display:flex;
+    align-items:center;
+    gap:12px;
+    padding:10px 18px;
+    background:var(--glass);
+    backdrop-filter:blur(20px);
+    border-bottom:1px solid var(--glassbrd);
+    flex-shrink:0;
+  }
+  .logo {
+    width:30px; height:30px;
+    background:linear-gradient(135deg,var(--purple),var(--pink));
+    border-radius:8px;
+    display:flex; align-items:center; justify-content:center;
+    font-size:14px; font-weight:800; color:#fff;
+    box-shadow:var(--glow-purple);
+  }
+  .title { font-weight:700; font-size:16px; letter-spacing:-.4px; }
+  .title em { font-style:normal; background:linear-gradient(135deg,var(--purple),var(--pink)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+  .title .ver { font-size:9px; color:var(--t3); font-weight:400; margin-left:4px; -webkit-text-fill-color:var(--t3); }
+  .target-pill {
+    display:flex; align-items:center; gap:8px;
+    background:var(--glass2);
+    border:1px solid var(--glassbrd2);
+    padding:6px 12px;
+    border-radius:20px;
+    font-family:var(--mono);
+    font-size:10px;
+    color:var(--t2);
+    max-width:480px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  .target-dot {
+    width:7px; height:7px;
+    background:var(--green);
+    border-radius:50%;
+    box-shadow:0 0 8px rgba(58,255,138,.6);
+    animation:pulse 2s infinite;
+    flex-shrink:0;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  .hdr-actions { margin-left:auto; display:flex; gap:6px; }
+  .ctx-pill {
+    display:flex; align-items:center; gap:6px;
+    background:var(--glass2);
+    border:1px solid var(--glassbrd2);
+    padding:5px 10px;
+    border-radius:16px;
+    font-size:10px;
+    color:var(--t2);
+    cursor:pointer;
+    font-weight:600;
+  }
+  .ctx-pill:hover { background:var(--glass3); color:var(--t1); }
+  .ctx-pill.active { background:linear-gradient(135deg,rgba(155,90,255,.3),rgba(255,90,170,.3)); color:#fff; border-color:rgba(155,90,255,.5); }
+  .ctx-dot { width:6px; height:6px; border-radius:50%; background:var(--purple); }
+
+  /* Subtab nav */
+  .nav {
+    display:flex;
+    gap:2px;
+    padding:6px 16px;
+    background:var(--bg1);
+    border-bottom:1px solid var(--glassbrd);
+    flex-shrink:0;
+  }
+  .nav-btn {
+    padding:8px 14px;
+    border:none;
+    background:transparent;
+    color:var(--t2);
+    font-family:var(--font);
+    font-size:11px;
+    font-weight:600;
+    cursor:pointer;
+    border-radius:6px;
+    transition:all .15s ease;
+    display:flex;
+    align-items:center;
+    gap:6px;
+  }
+  .nav-btn:hover { color:var(--t1); background:var(--glass2); }
+  .nav-btn.active { color:#fff; background:linear-gradient(135deg,var(--purple),var(--pink)); box-shadow:0 0 16px rgba(155,90,255,.25); }
+  .nav-btn:focus-visible { outline:2px solid var(--purple); outline-offset:2px; }
+  .nav-icon { font-family:var(--mono); font-size:12px; opacity:.85; }
+
+  /* Main panel area */
+  .main {
+    flex:1;
+    display:flex;
+    overflow:hidden;
+    min-height:0;
+  }
+
+  /* Left rail (history / collections) */
+  .rail {
+    width:280px;
+    background:var(--glass);
+    border-right:1px solid var(--glassbrd);
+    display:flex;
+    flex-direction:column;
+    flex-shrink:0;
+    overflow:hidden;
+  }
+  .rail-hdr {
+    padding:10px 14px;
+    border-bottom:1px solid var(--glassbrd);
+    display:flex;
+    align-items:center;
+    gap:6px;
+    flex-shrink:0;
+  }
+  .rail-title { font-size:10px; color:var(--t3); text-transform:uppercase; letter-spacing:.6px; font-weight:700; flex:1; }
+  .rail-list { flex:1; overflow-y:auto; padding:6px 6px 12px; }
+  .rail-item {
+    padding:8px 10px;
+    margin:2px 0;
+    border-radius:7px;
+    cursor:pointer;
+    display:flex;
+    align-items:center;
+    gap:8px;
+    font-size:11px;
+    transition:background .15s ease;
+    border:1px solid transparent;
+  }
+  .rail-item:hover { background:var(--glass2); }
+  .rail-item.active { background:var(--glass3); border-color:rgba(155,90,255,.3); }
+  .rail-method {
+    font-family:var(--mono);
+    font-size:9px;
+    font-weight:700;
+    padding:2px 5px;
+    border-radius:3px;
+    min-width:42px;
+    text-align:center;
+  }
+  .m-GET{background:rgba(58,168,255,.12);color:var(--blue)}
+  .m-POST{background:rgba(58,255,138,.12);color:var(--green)}
+  .m-PUT{background:rgba(255,197,58,.12);color:var(--yellow)}
+  .m-DELETE{background:rgba(255,58,92,.12);color:var(--red)}
+  .m-PATCH{background:rgba(155,90,255,.12);color:var(--purple)}
+  .m-OPTIONS,.m-HEAD{background:rgba(85,85,110,.12);color:var(--t3)}
+  .rail-path { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--t1); }
+  .rail-status { font-size:9px; font-weight:700; font-family:var(--mono); }
+  .s2{color:var(--green)}.s3{color:var(--yellow)}.s4{color:var(--orange)}.s5{color:var(--red)}
+
+  /* Right side panel */
+  .panel {
+    flex:1;
+    display:flex;
+    flex-direction:column;
+    overflow:hidden;
+    min-width:0;
+  }
+  .subtab { display:none; flex:1; flex-direction:column; overflow:hidden; }
+  .subtab.active { display:flex; }
+
+  /* Repeater request/response splitter */
+  .splitter { display:flex; flex:1; overflow:hidden; min-height:0; }
+  .splitter-left, .splitter-right {
+    flex:1; display:flex; flex-direction:column;
+    overflow:hidden; min-width:0;
+  }
+  .splitter-left { border-right:1px solid var(--glassbrd); }
+  .pane-hdr {
+    padding:8px 14px;
+    background:var(--bg2);
+    border-bottom:1px solid var(--glassbrd);
+    display:flex;
+    align-items:center;
+    gap:10px;
+    font-size:10px;
+    color:var(--t3);
+    text-transform:uppercase;
+    letter-spacing:.5px;
+    font-weight:700;
+    flex-shrink:0;
+  }
+  .pane-body { flex:1; overflow:auto; padding:0; min-height:0; }
+
+  /* Form rows for repeater */
+  .req-line {
+    display:flex; gap:6px; align-items:center;
+    padding:10px 14px;
+    border-bottom:1px solid var(--glassbrd);
+    background:var(--bgh);
+    flex-shrink:0;
+  }
+  .method-select {
+    background:var(--glass2);
+    border:1px solid var(--glassbrd2);
+    color:var(--t1);
+    font-family:var(--mono);
+    font-size:11px;
+    font-weight:700;
+    padding:6px 8px;
+    border-radius:6px;
+    cursor:pointer;
+    outline:none;
+  }
+  .url-input {
+    flex:1;
+    background:var(--glass);
+    border:1px solid var(--glassbrd2);
+    color:var(--t1);
+    font-family:var(--mono);
+    font-size:11px;
+    padding:6px 10px;
+    border-radius:6px;
+    outline:none;
+  }
+  .url-input:focus { border-color:rgba(155,90,255,.4); box-shadow:0 0 16px rgba(155,90,255,.1); }
+  .send-btn {
+    background:linear-gradient(135deg,var(--purple),var(--pink));
+    border:none;
+    color:#fff;
+    font-weight:700;
+    font-size:11px;
+    padding:7px 16px;
+    border-radius:6px;
+    cursor:pointer;
+    box-shadow:0 0 14px rgba(155,90,255,.25);
+    font-family:var(--font);
+  }
+  .send-btn:hover { opacity:.9; }
+  .send-btn:disabled { opacity:.5; cursor:not-allowed; }
+
+  /* Headers + body editor */
+  .editor-section { padding:8px 14px; border-bottom:1px solid var(--glassbrd); }
+  .editor-label {
+    font-size:9px;
+    color:var(--t3);
+    text-transform:uppercase;
+    letter-spacing:.5px;
+    font-weight:700;
+    margin-bottom:4px;
+    display:flex;
+    align-items:center;
+    gap:6px;
+  }
+  .text-area {
+    width:100%;
+    background:var(--glass);
+    border:1px solid var(--glassbrd);
+    border-radius:6px;
+    padding:8px 10px;
+    color:var(--t1);
+    font-family:var(--mono);
+    font-size:11px;
+    resize:vertical;
+    outline:none;
+    line-height:1.5;
+  }
+  .text-area:focus { border-color:rgba(155,90,255,.4); }
+  .text-area.headers { min-height:120px; }
+  .text-area.body { min-height:140px; }
+
+  /* Response display */
+  .resp-status-bar {
+    display:flex;
+    align-items:center;
+    gap:14px;
+    padding:8px 14px;
+    background:var(--bg2);
+    border-bottom:1px solid var(--glassbrd);
+    font-family:var(--mono);
+    font-size:10px;
+    color:var(--t2);
+    flex-shrink:0;
+  }
+  .resp-status-code { font-weight:700; font-size:13px; }
+  .resp-section { padding:10px 14px; border-bottom:1px solid var(--glassbrd); }
+  .resp-headers, .resp-body {
+    font-family:var(--mono);
+    font-size:10px;
+    color:var(--t2);
+    background:var(--glass);
+    padding:10px 12px;
+    border-radius:6px;
+    border:1px solid var(--glassbrd);
+    white-space:pre-wrap;
+    word-break:break-all;
+    max-height:400px;
+    overflow:auto;
+  }
+
+  /* Intruder */
+  .intruder-controls {
+    display:flex; gap:8px; padding:10px 14px;
+    background:var(--bgh);
+    border-bottom:1px solid var(--glassbrd);
+    align-items:flex-start;
+    flex-wrap:wrap;
+    flex-shrink:0;
+  }
+  .intruder-mode-pill {
+    background:var(--glass2);
+    border:1px solid var(--glassbrd2);
+    color:var(--t2);
+    padding:5px 10px;
+    border-radius:6px;
+    font-size:10px;
+    font-weight:600;
+    cursor:pointer;
+  }
+  .intruder-mode-pill.active { background:linear-gradient(135deg,var(--orange),var(--coral)); color:#fff; border-color:transparent; }
+  .payload-set-btn {
+    background:var(--glass2);
+    border:1px solid var(--glassbrd2);
+    color:var(--t2);
+    padding:5px 10px;
+    border-radius:6px;
+    font-size:10px;
+    font-weight:600;
+    cursor:pointer;
+    font-family:var(--font);
+  }
+  .payload-set-btn:hover { color:var(--t1); }
+  .payload-set-btn.selected { background:rgba(255,123,58,.15); color:var(--orange); border-color:rgba(255,123,58,.3); }
+  .start-btn {
+    background:linear-gradient(135deg,var(--orange),var(--coral));
+    border:none; color:#fff; font-weight:700; font-size:11px;
+    padding:7px 18px; border-radius:6px; cursor:pointer;
+    box-shadow:0 0 14px rgba(255,123,58,.25);
+  }
+  .start-btn:hover { opacity:.9; }
+  .start-btn:disabled { opacity:.5; cursor:not-allowed; }
+
+  .intruder-results {
+    flex:1; overflow:auto;
+    padding:0;
+  }
+  .results-table {
+    width:100%;
+    border-collapse:collapse;
+    font-family:var(--mono);
+    font-size:10px;
+  }
+  .results-table th {
+    text-align:left;
+    padding:8px 10px;
+    background:var(--bg2);
+    color:var(--t3);
+    text-transform:uppercase;
+    font-size:9px;
+    letter-spacing:.5px;
+    position:sticky;
+    top:0;
+    z-index:1;
+    border-bottom:1px solid var(--glassbrd);
+  }
+  .results-table td {
+    padding:5px 10px;
+    border-bottom:1px solid var(--glassbrd);
+    color:var(--t2);
+  }
+  .results-table tr:hover { background:var(--bgh); }
+  .results-table tr.anomaly { background:rgba(255,197,58,.04); }
+  .results-table .pl { color:var(--yellow); }
+
+  /* Encoder */
+  .encoder-grid {
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:14px;
+    padding:18px;
+    height:100%;
+    overflow:auto;
+  }
+  .encoder-card {
+    background:var(--glass);
+    border:1px solid var(--glassbrd);
+    border-radius:10px;
+    padding:14px;
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+  }
+  .encoder-card h3 { font-size:11px; color:var(--t1); text-transform:uppercase; letter-spacing:.5px; font-weight:700; }
+  .encoder-card .row { display:flex; gap:6px; flex-wrap:wrap; }
+  .encoder-btn {
+    background:var(--glass2);
+    border:1px solid var(--glassbrd2);
+    color:var(--t2);
+    padding:5px 10px;
+    border-radius:6px;
+    font-size:10px;
+    font-weight:600;
+    cursor:pointer;
+    font-family:var(--font);
+  }
+  .encoder-btn:hover { color:var(--t1); border-color:rgba(155,90,255,.3); }
+  .encoder-input {
+    width:100%;
+    background:var(--bg2);
+    border:1px solid var(--glassbrd);
+    color:var(--t1);
+    font-family:var(--mono);
+    font-size:11px;
+    padding:8px 10px;
+    border-radius:6px;
+    outline:none;
+    min-height:120px;
+    resize:vertical;
+    line-height:1.5;
+  }
+  .encoder-input:focus { border-color:rgba(155,90,255,.4); }
+
+  /* Diff */
+  .diff-toolbar {
+    padding:10px 14px;
+    background:var(--bgh);
+    border-bottom:1px solid var(--glassbrd);
+    display:flex;
+    gap:10px;
+    align-items:center;
+    font-size:10px;
+    color:var(--t3);
+    flex-shrink:0;
+  }
+  .diff-grid {
+    flex:1;
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    overflow:hidden;
+  }
+  .diff-pane {
+    display:flex;
+    flex-direction:column;
+    overflow:hidden;
+    border-right:1px solid var(--glassbrd);
+  }
+  .diff-pane:last-child { border-right:none; }
+  .diff-pane-hdr {
+    padding:8px 14px;
+    background:var(--bg2);
+    border-bottom:1px solid var(--glassbrd);
+    font-size:10px;
+    color:var(--t3);
+    text-transform:uppercase;
+    letter-spacing:.5px;
+    font-weight:700;
+  }
+  .diff-pane-body {
+    flex:1;
+    overflow:auto;
+    padding:12px 14px;
+    font-family:var(--mono);
+    font-size:11px;
+    line-height:1.5;
+    white-space:pre-wrap;
+    word-break:break-word;
+    color:var(--t1);
+  }
+  .diff-add { background:rgba(58,255,138,.18); color:var(--green); }
+  .diff-del { background:rgba(255,58,92,.18); color:var(--red); }
+  .diff-eq { color:var(--t2); }
+
+  /* Site Map */
+  .sitemap-tree {
+    flex:1;
+    overflow:auto;
+    padding:14px;
+    font-family:var(--mono);
+    font-size:11px;
+  }
+  .sitemap-host {
+    margin:8px 0;
+  }
+  .sitemap-host-name {
+    font-size:13px;
+    color:var(--purple);
+    font-weight:700;
+    padding:6px 0;
+    border-bottom:1px solid var(--glassbrd);
+    margin-bottom:6px;
+  }
+  .sitemap-row {
+    display:flex;
+    align-items:center;
+    gap:10px;
+    padding:4px 8px;
+    border-radius:5px;
+    cursor:pointer;
+  }
+  .sitemap-row:hover { background:var(--bgh); }
+  .sitemap-path { flex:1; color:var(--t1); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sitemap-codes { font-size:9px; color:var(--t3); display:flex; gap:4px; }
+  .sitemap-code-pill { padding:1px 5px; border-radius:3px; font-weight:700; }
+
+  /* Auth Contexts */
+  .auth-layout {
+    display:grid;
+    grid-template-columns:340px 1fr;
+    flex:1;
+    overflow:hidden;
+  }
+  .auth-sidebar {
+    border-right:1px solid var(--glassbrd);
+    display:flex;
+    flex-direction:column;
+    overflow:hidden;
+  }
+  .auth-list { flex:1; overflow-y:auto; padding:10px; }
+  .auth-card {
+    padding:10px 12px;
+    margin-bottom:8px;
+    background:var(--glass);
+    border:1px solid var(--glassbrd);
+    border-radius:8px;
+    cursor:pointer;
+  }
+  .auth-card.active { border-color:rgba(155,90,255,.4); background:var(--glass3); }
+  .auth-card-head { display:flex; align-items:center; gap:8px; margin-bottom:4px; }
+  .auth-card-name { font-weight:700; font-size:12px; flex:1; }
+  .auth-card-meta { font-size:9px; color:var(--t3); font-family:var(--mono); }
+  .auth-card-actions { display:flex; gap:4px; margin-top:6px; }
+  .auth-mini-btn { font-size:9px; padding:3px 6px; background:var(--glass2); border:1px solid var(--glassbrd2); color:var(--t3); border-radius:4px; cursor:pointer; font-family:var(--font); }
+  .auth-mini-btn:hover { color:var(--t1); }
+  .auth-mini-btn.danger:hover { color:var(--red); border-color:rgba(255,58,92,.3); }
+
+  .auth-edit { padding:18px; overflow:auto; flex:1; }
+  .auth-edit h2 { font-size:13px; color:var(--t1); margin-bottom:14px; font-weight:700; }
+  .field { margin-bottom:14px; }
+  .field-label { font-size:10px; color:var(--t3); text-transform:uppercase; letter-spacing:.5px; font-weight:700; margin-bottom:5px; display:block; }
+  .field-input {
+    width:100%;
+    background:var(--glass);
+    border:1px solid var(--glassbrd2);
+    color:var(--t1);
+    font-family:var(--mono);
+    font-size:11px;
+    padding:8px 10px;
+    border-radius:6px;
+    outline:none;
+  }
+  .field-input:focus { border-color:rgba(155,90,255,.4); }
+  .field-textarea { width:100%; background:var(--glass); border:1px solid var(--glassbrd2); color:var(--t1); font-family:var(--mono); font-size:11px; padding:8px 10px; border-radius:6px; outline:none; resize:vertical; line-height:1.5; min-height:90px; }
+  .field-textarea:focus { border-color:rgba(155,90,255,.4); }
+
+  .auth-matrix { padding:14px; overflow:auto; flex:1; }
+  .matrix-table { width:100%; border-collapse:collapse; font-family:var(--mono); font-size:10px; }
+  .matrix-table th { text-align:left; padding:6px 8px; color:var(--t3); border-bottom:1px solid var(--glassbrd); font-size:9px; text-transform:uppercase; }
+  .matrix-table td { padding:5px 8px; border-bottom:1px solid var(--glassbrd); color:var(--t2); }
+  .matrix-cell { text-align:center; font-weight:700; padding:3px 6px; border-radius:3px; }
+
+  /* Common buttons */
+  .btn {
+    background:var(--glass2);
+    border:1px solid var(--glassbrd2);
+    color:var(--t2);
+    padding:5px 10px;
+    border-radius:6px;
+    font-size:10px;
+    font-weight:600;
+    cursor:pointer;
+    font-family:var(--font);
+  }
+  .btn:hover { color:var(--t1); border-color:rgba(155,90,255,.3); }
+  .btn.primary {
+    background:linear-gradient(135deg,var(--purple),var(--pink));
+    color:#fff;
+    border-color:transparent;
+    box-shadow:0 0 12px rgba(155,90,255,.2);
+  }
+  .btn.danger:hover { color:var(--red); border-color:rgba(255,58,92,.3); }
+  .btn:focus-visible { outline:2px solid var(--purple); outline-offset:1px; }
+
+  /* Toast */
+  .toast {
+    position:fixed;
+    bottom:24px;
+    left:50%;
+    transform:translateX(-50%);
+    background:linear-gradient(135deg,var(--purple),var(--pink));
+    color:#fff;
+    padding:8px 22px;
+    border-radius:8px;
+    font-size:12px;
+    font-weight:700;
+    box-shadow:var(--glow-purple);
+    display:none;
+    z-index:1000;
+  }
+  .toast.show { display:block; animation:slideIn .25s ease; }
+  @keyframes slideIn { from { transform:translateX(-50%) translateY(10px); opacity:0; } to { transform:translateX(-50%) translateY(0); opacity:1; } }
+
+  /* Empty states */
+  .empty-state {
+    text-align:center;
+    padding:48px 20px;
+    color:var(--t3);
+  }
+  .empty-state-i { font-size:32px; margin-bottom:10px; opacity:.4; }
+  .empty-state-t { font-size:12px; }
+  .empty-state-s { font-size:10px; margin-top:6px; opacity:.7; max-width:340px; margin-left:auto; margin-right:auto; line-height:1.6; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width:6px; height:6px; }
+  ::-webkit-scrollbar-thumb { background:rgba(155,90,255,.25); border-radius:3px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+
+  /* Inline help / annotation */
+  .hint { font-size:9px; color:var(--t3); margin-top:4px; line-height:1.5; }
+  .position-marker { background:rgba(255,123,58,.2); color:var(--orange); padding:0 3px; border-radius:2px; }
+
+  .badge {
+    display:inline-block; font-family:var(--mono); font-size:8px; font-weight:700;
+    padding:2px 5px; border-radius:3px;
+    background:var(--glass2); color:var(--t3);
+    text-transform:uppercase; letter-spacing:.5px;
+  }
+</style>
+</head>
+<body>
+  <div class="hdr">
+    <div class="logo">P</div>
+    <div class="title">Pen<em>Scope</em> <span class="ver">Workbench v6.1</span></div>
+    <div class="target-pill"><div class="target-dot"></div><span id="targetUrl">—</span></div>
+    <div class="hdr-actions">
+      <button class="ctx-pill" id="ctxIndicator" title="Active auth context. Click to switch."><div class="ctx-dot"></div><span id="ctxName">Anonymous</span></button>
+    </div>
+  </div>
+
+  <nav class="nav" role="tablist">
+    <button class="nav-btn active" data-subtab="repeater" role="tab" aria-selected="true"><span class="nav-icon">↻</span>Repeater</button>
+    <button class="nav-btn" data-subtab="intruder" role="tab" aria-selected="false"><span class="nav-icon">⚡</span>Intruder</button>
+    <button class="nav-btn" data-subtab="encoder" role="tab" aria-selected="false"><span class="nav-icon">⌬</span>Encoder</button>
+    <button class="nav-btn" data-subtab="diff" role="tab" aria-selected="false"><span class="nav-icon">⇄</span>Diff</button>
+    <button class="nav-btn" data-subtab="sitemap" role="tab" aria-selected="false"><span class="nav-icon">⌥</span>Site Map</button>
+    <button class="nav-btn" data-subtab="auth" role="tab" aria-selected="false"><span class="nav-icon">⚿</span>Auth Contexts</button>
+  </nav>
+
+  <div class="main">
+    <!-- REPEATER ============================================================ -->
+    <div class="subtab active" id="sub-repeater">
+      <div style="display:flex;flex:1;overflow:hidden;min-height:0">
+        <aside class="rail">
+          <div class="rail-hdr">
+            <div class="rail-title">History</div>
+            <button class="btn" id="repClearHistory" title="Clear all history">Clear</button>
+          </div>
+          <div class="rail-list" id="repHistoryList"></div>
+        </aside>
+        <div class="panel">
+          <div class="splitter">
+            <div class="splitter-left">
+              <div class="pane-hdr"><span>Request</span><span style="margin-left:auto" id="repBaseLabel"></span></div>
+              <div class="req-line">
+                <select class="method-select" id="repMethod">
+                  <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>OPTIONS</option><option>HEAD</option>
+                </select>
+                <input type="text" class="url-input" id="repUrl" placeholder="https://target.tld/api/path" spellcheck="false">
+                <button class="send-btn" id="repSendBtn">Send</button>
+              </div>
+              <div class="editor-section">
+                <div class="editor-label">Headers <span class="badge">one per line · Name: Value</span></div>
+                <textarea class="text-area headers" id="repHeaders" placeholder="Authorization: Bearer xxx&#10;Content-Type: application/json" spellcheck="false"></textarea>
+              </div>
+              <div class="editor-section">
+                <div class="editor-label">Body <span class="badge">raw</span></div>
+                <textarea class="text-area body" id="repBody" placeholder="{}" spellcheck="false"></textarea>
+              </div>
+              <div class="editor-section" style="display:flex;gap:6px;align-items:center">
+                <button class="btn" id="repCopyCurl">Copy as curl</button>
+                <button class="btn" id="repSendIntruder">Send to Intruder →</button>
+                <button class="btn" id="repSendDiff">Send response to Diff</button>
+                <span style="flex:1"></span>
+                <span class="hint" id="repCtxHint">Active context: <strong id="repCtxName">Anonymous</strong></span>
+              </div>
+            </div>
+            <div class="splitter-right">
+              <div class="pane-hdr"><span>Response</span><span style="margin-left:auto" id="repTimeLabel"></span></div>
+              <div id="repRespBody">
+                <div class="empty-state">
+                  <div class="empty-state-i">↻</div>
+                  <div class="empty-state-t">No request sent yet</div>
+                  <div class="empty-state-s">Edit the request on the left and hit <strong>Send</strong>. Or pick a captured request from the history rail. Auth context cookies + headers are merged automatically.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- INTRUDER ============================================================ -->
+    <div class="subtab" id="sub-intruder">
+      <div class="intruder-controls">
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <div class="editor-label" style="margin:0">Attack mode</div>
+          <div style="display:flex;gap:4px">
+            <button class="intruder-mode-pill active" data-mode="sniper">Sniper</button>
+            <button class="intruder-mode-pill" data-mode="cluster">Cluster bomb</button>
+            <button class="intruder-mode-pill" data-mode="pitchfork">Pitchfork</button>
+            <button class="intruder-mode-pill" data-mode="battering">Battering ram</button>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <div class="editor-label" style="margin:0">Built-in payload sets</div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <button class="payload-set-btn" data-payload="xss">XSS (40)</button>
+            <button class="payload-set-btn" data-payload="sqli">SQLi (30)</button>
+            <button class="payload-set-btn" data-payload="lfi">LFI (28)</button>
+            <button class="payload-set-btn" data-payload="ssti">SSTI (18)</button>
+            <button class="payload-set-btn" data-payload="ssrf">SSRF (22)</button>
+            <button class="payload-set-btn" data-payload="cmdi">CmdInj (24)</button>
+            <button class="payload-set-btn" data-payload="ids">IDs 1-100</button>
+            <button class="payload-set-btn" data-payload="bypass">Auth bypass</button>
+            <button class="payload-set-btn" data-payload="usernames">Usernames</button>
+          </div>
+        </div>
+        <button class="start-btn" id="intStart" style="margin-left:auto;align-self:flex-end">Start Attack</button>
+      </div>
+
+      <div class="splitter" style="flex-shrink:0;max-height:340px">
+        <div class="splitter-left">
+          <div class="pane-hdr"><span>Base request</span><span class="hint" style="margin-left:auto;color:var(--t3)">Wrap insertion points in §payload§</span></div>
+          <div class="req-line">
+            <select class="method-select" id="intMethod">
+              <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option>
+            </select>
+            <input type="text" class="url-input" id="intUrl" placeholder="https://target.tld/api/users/§1§" spellcheck="false">
+          </div>
+          <div class="editor-section">
+            <div class="editor-label">Headers</div>
+            <textarea class="text-area headers" id="intHeaders" placeholder="Authorization: Bearer §TOKEN§" spellcheck="false" style="min-height:80px"></textarea>
+          </div>
+          <div class="editor-section">
+            <div class="editor-label">Body</div>
+            <textarea class="text-area body" id="intBody" spellcheck="false" style="min-height:80px"></textarea>
+          </div>
+        </div>
+        <div class="splitter-right">
+          <div class="pane-hdr"><span>Custom payloads</span><span class="hint" style="margin-left:auto">One per line. Replaces selected built-in.</span></div>
+          <div style="padding:10px 14px">
+            <textarea class="text-area" id="intCustomPayloads" placeholder="admin&#10;administrator&#10;root&#10;test&#10;..." spellcheck="false" style="min-height:200px"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="intruder-results" id="intResults">
+        <div class="empty-state">
+          <div class="empty-state-i">⚡</div>
+          <div class="empty-state-t">No attack running</div>
+          <div class="empty-state-s">Mark insertion points in the request with <span class="position-marker">§payload§</span> markers, pick a payload set or paste your own, then click <strong>Start Attack</strong>. Sniper substitutes one position at a time; Cluster bomb tries every combination; Pitchfork pairs payloads in order; Battering ram puts the same payload in every position.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ENCODER ============================================================== -->
+    <div class="subtab" id="sub-encoder">
+      <div class="encoder-grid">
+        <div class="encoder-card">
+          <h3>Input</h3>
+          <textarea class="encoder-input" id="encInput" placeholder="Paste any text here. The conversion buttons below operate on this input." spellcheck="false"></textarea>
+          <div class="row">
+            <button class="encoder-btn" data-enc="b64-encode">Base64 encode</button>
+            <button class="encoder-btn" data-enc="b64-decode">Base64 decode</button>
+            <button class="encoder-btn" data-enc="b64url-encode">B64-URL encode</button>
+            <button class="encoder-btn" data-enc="b64url-decode">B64-URL decode</button>
+            <button class="encoder-btn" data-enc="url-encode">URL encode</button>
+            <button class="encoder-btn" data-enc="url-decode">URL decode</button>
+            <button class="encoder-btn" data-enc="html-encode">HTML encode</button>
+            <button class="encoder-btn" data-enc="html-decode">HTML decode</button>
+            <button class="encoder-btn" data-enc="hex-encode">Hex encode</button>
+            <button class="encoder-btn" data-enc="hex-decode">Hex decode</button>
+            <button class="encoder-btn" data-enc="md5">MD5</button>
+            <button class="encoder-btn" data-enc="sha1">SHA-1</button>
+            <button class="encoder-btn" data-enc="sha256">SHA-256</button>
+            <button class="encoder-btn" data-enc="sha512">SHA-512</button>
+          </div>
+        </div>
+        <div class="encoder-card">
+          <h3>Output</h3>
+          <textarea class="encoder-input" id="encOutput" readonly placeholder="(transformation result appears here)"></textarea>
+          <div class="row">
+            <button class="encoder-btn" id="encCopyOut">Copy</button>
+            <button class="encoder-btn" id="encSwap">↑ Swap to input</button>
+          </div>
+        </div>
+
+        <div class="encoder-card" style="grid-column:1/3">
+          <h3>JWT decoder + forger</h3>
+          <div class="hint">Paste a token. Header + payload appear below decoded. Edit either, then forge a new unsigned (alg=none) token or sign with a guessed key (HS256).</div>
+          <textarea class="encoder-input" id="jwtInput" style="min-height:60px" placeholder="eyJhbGciOiJIUzI1NiI...&#10;&#10;or paste it here and click Decode" spellcheck="false"></textarea>
+          <div class="row">
+            <button class="encoder-btn" id="jwtDecode">Decode</button>
+            <button class="encoder-btn" id="jwtForgeNone">Forge alg=none</button>
+            <button class="encoder-btn" id="jwtSignHs256">Sign HS256</button>
+            <input type="text" class="field-input" id="jwtSecret" placeholder="HS256 secret (try: secret, key, password, jwt-secret)" style="flex:1;min-width:240px">
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:6px">
+            <div>
+              <div class="editor-label">Header (decoded)</div>
+              <textarea class="encoder-input" id="jwtHeader" style="min-height:80px" placeholder='{"alg":"HS256","typ":"JWT"}' spellcheck="false"></textarea>
+            </div>
+            <div>
+              <div class="editor-label">Payload (decoded)</div>
+              <textarea class="encoder-input" id="jwtPayload" style="min-height:80px" placeholder='{"sub":"user","role":"admin","exp":9999999999}' spellcheck="false"></textarea>
+            </div>
+          </div>
+          <div>
+            <div class="editor-label">Forged token</div>
+            <textarea class="encoder-input" id="jwtOutput" style="min-height:60px" readonly placeholder="(forged JWT appears here)"></textarea>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DIFF ================================================================ -->
+    <div class="subtab" id="sub-diff">
+      <div class="diff-toolbar">
+        <span>Paste two responses or send from Repeater. Differences highlight character-by-character.</span>
+        <span style="flex:1"></span>
+        <button class="btn" id="diffSwap">↔ Swap</button>
+        <button class="btn" id="diffCompute">Compute Diff</button>
+        <button class="btn" id="diffClear">Clear</button>
+      </div>
+      <div class="diff-grid">
+        <div class="diff-pane">
+          <div class="diff-pane-hdr">Left <span class="badge" id="diffLeftBadge" style="margin-left:6px"></span></div>
+          <textarea class="diff-pane-body" id="diffLeft" style="border:none;background:transparent;outline:none;resize:none;color:var(--t1)" placeholder="Paste response A here..." spellcheck="false"></textarea>
+        </div>
+        <div class="diff-pane">
+          <div class="diff-pane-hdr">Right <span class="badge" id="diffRightBadge" style="margin-left:6px"></span></div>
+          <textarea class="diff-pane-body" id="diffRight" style="border:none;background:transparent;outline:none;resize:none;color:var(--t1)" placeholder="Paste response B here..." spellcheck="false"></textarea>
+        </div>
+      </div>
+      <div id="diffResult" style="border-top:1px solid var(--glassbrd);max-height:0;overflow:hidden;transition:max-height .3s ease">
+        <div class="diff-pane-hdr">Result <span class="badge" id="diffSummary" style="margin-left:6px">—</span></div>
+        <div class="diff-pane-body" id="diffOut" style="white-space:pre-wrap"></div>
+      </div>
+    </div>
+
+    <!-- SITE MAP ============================================================ -->
+    <div class="subtab" id="sub-sitemap">
+      <div class="sitemap-tree" id="sitemapTree">
+        <div class="empty-state">
+          <div class="empty-state-i">⌥</div>
+          <div class="empty-state-t">Site map building...</div>
+          <div class="empty-state-s">Endpoints captured by PenScope are organized here as a tree by host and path. Click any path to load it into Repeater.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AUTH CONTEXTS ======================================================= -->
+    <div class="subtab" id="sub-auth">
+      <div class="auth-layout">
+        <aside class="auth-sidebar">
+          <div class="rail-hdr">
+            <div class="rail-title">Auth contexts</div>
+            <button class="btn primary" id="authNewBtn">+ New</button>
+          </div>
+          <div class="auth-list" id="authList"></div>
+          <div style="padding:14px;border-top:1px solid var(--glassbrd)">
+            <button class="btn" id="authMatrixRun" style="width:100%">Run authorization matrix →</button>
+            <div class="hint" style="margin-top:6px">Probes every observed endpoint with every saved context. Color-coded grid reveals IDOR/BAC.</div>
+          </div>
+        </aside>
+        <div class="panel" id="authMain">
+          <div class="auth-edit" id="authEdit">
+            <h2>Edit context</h2>
+            <div class="field">
+              <label class="field-label">Name</label>
+              <input type="text" class="field-input" id="authName" placeholder="e.g. User A — paid plan">
+            </div>
+            <div class="field">
+              <label class="field-label">Cookies (one per line, name=value)</label>
+              <textarea class="field-textarea" id="authCookies" placeholder="session=abc123&#10;csrftoken=xyz789"></textarea>
+            </div>
+            <div class="field">
+              <label class="field-label">Headers (one per line, Name: Value)</label>
+              <textarea class="field-textarea" id="authHeaders" placeholder="Authorization: Bearer eyJhbGciOi...&#10;X-API-Key: 1234"></textarea>
+            </div>
+            <div class="field">
+              <label class="field-label">Notes</label>
+              <input type="text" class="field-input" id="authNotes" placeholder="optional — what this user can do, role level, etc.">
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn primary" id="authSave">Save</button>
+              <button class="btn" id="authActivate">Activate</button>
+              <button class="btn danger" id="authDelete">Delete</button>
+            </div>
+          </div>
+          <div id="authMatrixView" style="display:none"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="workbench.js"></script>
+</body>
+</html>
