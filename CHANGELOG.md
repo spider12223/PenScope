@@ -1,5 +1,80 @@
 # PenScope Changelog
 
+## v6.2.5 — Markdown report: redact auth + include the v6.x stuff that was missing
+
+User audited the Classic exports and noticed the Markdown report (📄 Full Report .md)
+was leaking auth header values, missing several v6.x state fields, and didn't include
+Hunt Mode's drafted bounty reports — the most valuable artifacts PenScope produces
+were never reaching the export.
+
+JSON (full data) export untouched — that's the team-share format and credentials are
+intended payload there. This release only changes the Markdown export.
+
+### Auth-header redaction (security)
+
+The Markdown report is the format users typically attach to a HackerOne / Bugcrowd /
+Intigriti submission OR send to a customer's blue team. Including live session
+credentials in that artifact is bad — the bounty triager doesn't need your cookies,
+and your own team's session shouldn't end up in the customer's Slack.
+
+New `redactHeaderValue()` helper replaces the value of any auth-bearing header with
+`<redacted, N chars>` in the Markdown report. Headers covered:
+
+- `Authorization`, `Cookie`, `Proxy-Authorization`
+- `X-API-Key`, `X-Auth-Token`, `X-Access-Token`, `X-Session-Id`
+- `X-CSRF-Token`, `X-XSRF-Token`
+- `X-Amz-Security-Token` (AWS), `X-SAP-Passport`, `X-Functions-Key` (Azure)
+- `X-Hasura-Admin-Secret`, `X-Supabase-Auth`
+
+Other headers (User-Agent, Accept, Content-Type, etc.) keep their values. The report
+header now explicitly says: _"Auth header values redacted — see JSON (full data)
+export for team-share with credentials."_
+
+### Hunt Mode drafted reports now included
+
+The Markdown export now async-loads `chrome.storage.local["ps:hunt:<host>"]` and
+appends a **Hunt Mode Drafted Reports** section with each draft embedded under a
+`<details>` fold. The full bounty-ready markdown is preserved verbatim. Toast
+confirms how many drafts were included.
+
+Previously these reports lived in their own storage bucket and never reached the
+Classic export — you had to go to Hunt Mode → Reports → Export All separately. Now
+they're part of the unified Full Report.
+
+### Three new sections from v6.0+ state
+
+Sections that should have been added with v6.0 but weren't:
+
+- **⚔️ Stack-Aware Attack Pack Hits** — grouped by family (Laravel/Spring/Rails/
+  ASP.NET/Django/Next.js/GraphQL/WordPress) with confirmed exposures + URLs +
+  evidence snippet. Pulls from `D.stackAttacks`.
+- **🔔 Continuous Monitor Alerts** — log of secret-leak Chrome notifications fired
+  since Continuous Monitor was enabled. Useful for long-running engagements where
+  the target shipped a deploy mid-test and a new credential leaked. Pulls from
+  `D.continuousMonitor.alerts`.
+- **✅ Marked as Fixed** — Blue mode "this is resolved on our side" triage state.
+  Useful for customer-engagement reports where the team has already addressed
+  some findings before submission. Pulls from `D.markedFixed`.
+
+### Cosmetic
+
+- Report title: `# PenScope v5.9 Recon Report` → `# PenScope v6.2 Recon Report`
+  (was 7 versions stale).
+- Subtitle clarifies redaction status: _"Auth header values redacted — see JSON
+  (full data) export for team-share with credentials."_
+
+### Result
+
+Old Markdown export: leaked your session cookies, didn't include drafted bounty
+reports, omitted Laravel/Spring/etc. stack attack hits, no monitor alert log, no
+fixed-state info, said v5.9 in the title.
+
+New Markdown export: safe to attach to a HackerOne report, includes every drafted
+Hunt Mode bounty PoC, surfaces all stack-pack hits, alert log + fix triage status,
+correctly versioned.
+
+JSON (full data) export: unchanged. Still the team-share format with everything.
+
 ## v6.2.4 — Hunt Mode: DOM auto-crawl + pre-flight indicator
 
 User correctly pointed out that "Hunt" implied autonomous crawling, but Hunt Mode

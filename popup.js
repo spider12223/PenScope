@@ -3309,8 +3309,24 @@ function updateFooter(){
 // SHARED REPORT BUILDER — used by sendToClaude() and exportData("report")
 // opts.format: "claude" (clipboard, concise) or "markdown" (download, verbose)
 // -------------------------------------------------------
+// v6.2.5 — Auth-header redactor for the Markdown report. The Markdown report is the
+// format users typically attach to a HackerOne / Bugcrowd / Intigriti submission OR
+// share with a customer's blue team — it should NOT contain live session credentials.
+// Headers that carry auth (Authorization, Cookie, X-API-Key, etc.) get their values
+// replaced with `<redacted, N chars>` so triagers see the header was present without
+// receiving the actual credential. The JSON (full data) export is untouched — that's
+// the team-share format and credentials are intended payload there.
+function isAuthHeaderName(name){
+  return /^(authorization|cookie|x-api-key|x-auth-token|x-access-token|x-session-id|x-csrf-token|x-xsrf-token|proxy-authorization|x-amz-security-token|x-sap-passport|x-functions-key|x-hasura-admin-secret|x-supabase-auth)$/i.test((name||"").trim());
+}
+function redactHeaderValue(name,value){
+  if(!isAuthHeaderName(name))return value;
+  const len=(value||"").length;
+  return `<redacted, ${len} chars>`;
+}
+
 function buildReport(opts){const v=opts.format==="markdown";const tgtUrl=document.getElementById("tgtUrl").textContent||D.url||"?";const hasDeepData=(D.responseBodies?.length||0)+(D.consoleLogs?.length||0)+(D.auditIssues?.length||0)+(D.scriptSources?.length||0)+(D.executionContexts?.length||0)+(D.discoveredRoutes?.length||0)>0;
-let r=`# PenScope v5.9 Recon Report\n**Target:** ${tgtUrl}\n**Time:** ${new Date().toISOString()}\n**Deep:** ${hasDeepData?"ON (data captured)":D.deepEnabled?"ON":"OFF"}\n`;
+let r=`# PenScope v6.2 Recon Report\n**Target:** ${tgtUrl}\n**Time:** ${new Date().toISOString()}\n**Deep:** ${hasDeepData?"ON (data captured)":D.deepEnabled?"ON":"OFF"}\n_Auth header values redacted — see JSON (full data) export for team-share with credentials._\n`;
 if(v)r+=`**Endpoints:** ${D.endpoints?.length||0} | **Secrets:** ${D.secrets?.length||0} | **Script Findings:** ${D.scriptSources?.length||0} | **Discovered Routes:** ${D.discoveredRoutes?.length||0} | **Audit Issues:** ${D.auditIssues?.length||0}\n\n---\n\n`;
 else r+=`**Discovered Routes:** ${D.discoveredRoutes?.length||0} (endpoints found in code but never called)\n\nAnalyze all findings. Prioritize: XSS sinks, IDOR path params, missing auth, error disclosures, JSONP, mixed content. For discovered routes — identify admin panels, auth endpoints, and destructive actions to test.\n\n---\n\n`;
 // v5.9: Attack Chains at the TOP of every report — the highest-signal findings first.
@@ -3350,7 +3366,7 @@ if(D.redirectChains?.length){r+=`## Redirects (${D.redirectChains.length})\n`;D.
 if(D.authFlows?.length){r+=`## Auth Flows\n`;D.authFlows.forEach(a=>r+=`- ${a.method} **${a.type}** → \`${a.path}\`\n`);r+=`\n`;}
 if(D.secrets?.length){r+=`## Secrets (${D.secrets.length})\n`;D.secrets.forEach(s=>r+=`- [${s.severity.toUpperCase()}] **${s.type}**: \`${s.value}\` (${s.source})\n`);r+=`\n`;}
 if(D.responseBodies?.length){r+=`## Response Body Findings (${D.responseBodies.length}) [DEEP]\n`;D.responseBodies.forEach(f=>{r+=`- [${f.severity.toUpperCase()}] **${f.pattern}**: \`${f.value}\` — ${f.description}\n  URL: ${f.url.substring(0,80)} (${f.status})\n`;if(v&&f.context)r+=`  Context: ${f.context}\n`;});r+=`\n`;}
-if(D.requestHeaders?.length){r+=`## Request Auth Headers [DEEP]\n`;D.requestHeaders.forEach(rh=>{r+=`- ${rh.method} ${rh.url.substring(0,80)}\n`;rh.headers.forEach(h2=>r+=`  ${h2.name}: \`${h2.value.substring(0,100)}\`\n`);});r+=`\n`;}
+if(D.requestHeaders?.length){r+=`## Request Auth Headers [DEEP]\n`;r+=`_Values for Authorization, Cookie, X-API-Key, X-Auth-Token, etc. are redacted in this Markdown export. Use JSON (full data) for team-share with full credentials._\n\n`;D.requestHeaders.forEach(rh=>{r+=`- ${rh.method} ${rh.url.substring(0,80)}\n`;rh.headers.forEach(h2=>{const safeVal=redactHeaderValue(h2.name,h2.value);r+=`  ${h2.name}: \`${safeVal.substring(0,200)}\`\n`;});});r+=`\n`;}
 if(D.certInfo){r+=`## TLS Cert [DEEP]\n`;if(D.certInfo.subjectName)r+=`- Subject: ${D.certInfo.subjectName}\n`;if(D.certInfo.issuer)r+=`- Issuer: ${D.certInfo.issuer}\n`;if(D.certInfo.sanList?.length)r+=`- SANs: ${D.certInfo.sanList.join(", ")}\n`;r+=`\n`;}
 const mf=D.headers?.find(h2=>h2.type==="main_frame");if(mf){const all=[];(mf.missing||[]).forEach(m=>all.push(`[${m.severity.toUpperCase()}] Missing: ${m.header}${v?" — "+m.desc:""}`));(mf.corsIssues||[]).forEach(c2=>all.push(`[${c2.severity.toUpperCase()}] CORS: ${c2.header}${v?" — "+c2.desc:""}`));(mf.cookieIssues||[]).forEach(ck=>all.push(`[${v?ck.severity.toUpperCase():"MEDIUM"}] Cookie ${ck.cookie}: ${ck.issue}`));if(mf.cspAnalysis?.issues)mf.cspAnalysis.issues.forEach(i=>all.push(`[${i.severity.toUpperCase()}] CSP: ${i.desc}`));(mf.leaks||[]).forEach(l=>all.push(`[INFO] ${l.name}: ${l.value}`));if(all.length){r+=`## Header Issues (${all.length})\n`;all.forEach(i=>r+=`- ${i}\n`);r+=`\n`;}}
 if(D.forms?.length){r+=`## Forms (${D.forms.length})\n`;D.forms.forEach(f=>r+=`- ${f.method} \`${f.action}\` — ${f.inputCount} inputs, CSRF: ${f.hasCSRF?"YES":"**NO**"}${f.hasFileUpload?", UPLOAD":""}${f.hasPasswordField?", PASSWORD":""}\n`);r+=`\n`;}
@@ -3793,6 +3809,78 @@ if(D.symbolTable?.length&&D.symbolTable[0]?.total){
     r+=`### Full sample (${st.sample.length})\n\`\`\`\n${st.sample.join(", ")}\n\`\`\`\n\n`;
   }
 }
+
+// v6.0: Stack-aware attack pack hits — Laravel/Spring/Rails/ASP.NET/Django/Next.js/
+// GraphQL/WordPress confirmed exposures. Grouped by stack family for triage.
+if(D.stackAttacks?.length){
+  const confirmed=D.stackAttacks.filter(a=>a.confirmed);
+  if(confirmed.length){
+    const families={};
+    confirmed.forEach(a=>{const fam=a.family||"unknown";(families[fam]=families[fam]||[]).push(a);});
+    r+=`## ⚔️ Stack-Aware Attack Pack Hits (${confirmed.length} confirmed across ${Object.keys(families).length} stack${Object.keys(families).length===1?"":"s"}) [PROBE]\n`;
+    r+=`Stack-specific attacks fired automatically when the matching framework was detected. Confirmed = the response either returned 2xx with non-trivial body OR matched the pack's expected reflection patterns.\n\n`;
+    Object.entries(families).forEach(([fam,hits])=>{
+      r+=`### ${fam} (${hits.length} confirmed hit${hits.length===1?"":"s"})\n`;
+      hits.forEach(h=>{
+        r+=`- [${(h.severity||"medium").toUpperCase()}] **${h.step||"unknown"}** — ${h.method||"GET"} \`${h.url||""}\` → ${h.status||"?"}${h.timeMs?" ("+h.timeMs+"ms)":""}\n`;
+        if(h.evidence)r+=`  Evidence: \`${String(h.evidence).substring(0,v?500:200).replace(/[\r\n]/g," ")}${String(h.evidence).length>(v?500:200)?"…":""}\`\n`;
+      });
+      r+=`\n`;
+    });
+  }
+}
+
+// v6.0: Continuous monitor alerts — secret-leak Chrome notifications fired since the
+// monitor was enabled. Useful for long-running engagements: a target shipped a deploy
+// mid-test and a new credential leaked, the monitor caught it, the report records when.
+if(D.continuousMonitor?.alerts?.length){
+  const alerts=D.continuousMonitor.alerts;
+  r+=`## 🔔 Continuous Monitor Alerts (${alerts.length})\n`;
+  r+=`Secret-leak notifications fired by Continuous Monitor since it was enabled. Each entry indicates new secrets appeared on the host between scan cycles.\n\n`;
+  alerts.forEach(a=>{
+    r+=`- **${new Date(a.ts||0).toISOString()}** — ${a.count||1} new secret${a.count===1?"":"s"} detected on \`${a.host||"target"}\`\n`;
+  });
+  r+=`\n`;
+}
+
+// v6.0: Marked-as-fixed — Blue mode "this is resolved on our side" triage state.
+// Surfacing this in the report tells a reader (especially a customer reviewing the
+// engagement) which issues the team has already addressed.
+if(D.markedFixed?.length){
+  r+=`## ✅ Marked as Fixed (${D.markedFixed.length})\n`;
+  r+=`Findings the team has manually triaged as resolved (in Blue mode). These are excluded from the live health-score calculation until the next scan disagrees.\n\n`;
+  D.markedFixed.forEach(f=>{
+    const id=(typeof f==="string"?f:f.id)||"(unknown)";
+    const ts=(typeof f==="object"&&f.markedAt)?new Date(f.markedAt).toISOString():"(no timestamp)";
+    r+=`- \`${id}\` — marked at ${ts}\n`;
+  });
+  r+=`\n`;
+}
+
+// v6.2: Hunt Mode drafted reports. The most valuable artifacts PenScope produces but
+// they live in chrome.storage.local (separate from tab state), so they were never
+// reaching the Markdown export. Caller (exportData) loads them async and passes via
+// opts.huntReports. Each is a complete H1-format draft — embed verbatim under a
+// folded section so the parent report stays scannable while drafts remain readable.
+if(opts&&opts.huntReports&&opts.huntReports.length){
+  const hr=opts.huntReports;
+  r+=`## 🎯 Hunt Mode Drafted Reports (${hr.length})\n`;
+  r+=`Bounty-ready reports drafted automatically by Hunt Mode. Each was generated when the chain analyzer surfaced a Critical or High finding (or, in v6.2.1+, when an individual high-severity passive finding warranted drafting on its own).\n\n`;
+  hr.forEach((rep,idx)=>{
+    const sev=(rep.severity||"medium").toUpperCase();
+    const ts=rep.timestamp?new Date(rep.timestamp).toLocaleString():"(no timestamp)";
+    r+=`### Report ${idx+1}: [${sev}] ${rep.title||"(untitled)"}\n`;
+    r+=`Drafted ${ts} · confidence ${rep.confidence||"?"}%\n\n`;
+    if(v){
+      // Markdown: embed full draft verbatim. Reader sees everything inline.
+      r+=`<details><summary>Full draft (click to expand)</summary>\n\n${rep.markdown||"(no markdown)"}\n\n</details>\n\n`;
+    }else{
+      // Compact (Claude format): just summary line, the full drafts are huge
+      r+=`_(see Hunt Mode → Reports tab for full draft)_\n\n`;
+    }
+  });
+}
+
 return r;}
 
 // -------------------------------------------------------
@@ -3807,10 +3895,17 @@ navigator.clipboard.writeText(r).then(()=>{
 // EXPORTS
 function exportData(fmt){if(!D)return;const host=document.getElementById("tgtUrl").textContent.replace(/https?:\/\//,"").split("/")[0]||"target";const tgtUrl=document.getElementById("tgtUrl").textContent||D.url||"?";const hasDeepData=(D.responseBodies?.length||0)+(D.consoleLogs?.length||0)+(D.auditIssues?.length||0)+(D.scriptSources?.length||0)+(D.executionContexts?.length||0)+(D.discoveredRoutes?.length||0)>0;switch(fmt){case"json":download(`penscope_${host}.json`,JSON.stringify(D,null,2),"application/json");toast("Full JSON downloaded");break;
 case"report":{
-  const r=buildReport({format:"markdown"});
-  // all report sections handled by buildReport()
-  download(`penscope_${host}_report.md`,r,"text/markdown");
-  toast(`Full report downloaded (${Math.round(r.length/1024)}KB)`);
+  // v6.2.5 — Async-load Hunt Mode drafted reports from chrome.storage.local so the
+  // Markdown export includes them. They live under "ps:hunt:<host>" and are NOT in
+  // tab state (the data engine), so the previous synchronous buildReport call missed
+  // them entirely. We fetch them, then call buildReport with the result in opts.
+  chrome.storage.local.get("ps:hunt:"+host,r2=>{
+    void chrome.runtime.lastError;
+    const huntReports=((r2["ps:hunt:"+host]||{}).reports)||[];
+    const r=buildReport({format:"markdown",huntReports});
+    download(`penscope_${host}_report.md`,r,"text/markdown");
+    toast(`Full report downloaded (${Math.round(r.length/1024)}KB${huntReports.length?", "+huntReports.length+" Hunt drafts":""})`);
+  });
   break;}
 case"burp":{let t="";D.endpoints?.forEach(e=>t+=e.url+"\n");
   // v5.1: Include discovered routes in Burp URL list
