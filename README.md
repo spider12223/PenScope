@@ -11,14 +11,14 @@
 
 ### A bug bounty toolkit that lives inside your browser.
 
-![version](https://img.shields.io/badge/version-6.2.2-ff3a5c?style=for-the-badge)
+![version](https://img.shields.io/badge/version-6.2.5-ff3a5c?style=for-the-badge)
 ![manifest](https://img.shields.io/badge/manifest-v3-9b5aff?style=for-the-badge)
 ![deps](https://img.shields.io/badge/dependencies-0-3aff8a?style=for-the-badge)
 ![lines](https://img.shields.io/badge/LOC-16%2C000%2B-3aa8ff?style=for-the-badge)
 ![price](https://img.shields.io/badge/price-free-3addc4?style=for-the-badge)
 ![license](https://img.shields.io/badge/license-MIT-55556e?style=for-the-badge)
 
-**[Quick start](#quick-start) · [Hunt Mode](#hunt-mode) · [Workbench](#the-workbench) · [Modes](#modes) · [vs Burp](#vs-burp) · [Under the hood](#under-the-hood)**
+**[Quick start](#quick-start) · [Hunt Mode](#hunt-mode) · [Workbench](#the-workbench) · [Modes](#modes) · [Exports](#exports) · [vs Burp](#vs-burp) · [Under the hood](#under-the-hood)**
 
 </div>
 
@@ -80,18 +80,21 @@ PenScope captures 60+ data fields per tab. Here's what that means in practice:
 
 ## Hunt Mode
 
-Click `🎯 Hunt` in the popup header. A new tab opens. Configure your target scope (in-scope paths, out-of-scope paths, aggression level, time budget). Click `▶ Start Hunt`.
+Click `🎯 Hunt` in the popup header. A new tab opens. The **pre-flight panel** at the bottom shows your engine state — endpoints captured, secrets, tech detected, auth contexts saved — so you know whether you have enough surface for a productive hunt before clicking Start. If endpoints < 20, a yellow warning suggests you browse the target first OR rely on the new DOM auto-crawl step. Configure your target scope (in-scope paths, out-of-scope paths, aggression level, time budget). Click `▶ Start Hunt`.
 
 PenScope autonomously:
 
 1. Settles passive recon
 2. **Auto-enables Deep mode** (CDP debugger attaches silently — no user prompt)
-3. Runs the full 36-step probe pipeline + 8 stack-aware attack packs
-4. Sweeps the **Authorization Matrix** across saved auth contexts
-5. Runs the chain correlator, filters by your scope rules
-6. **Drafts a complete HackerOne-format report for every Critical and High finding** — chains *and* individual high-severity findings (exposed secrets, JWT alg=none, confirmed SSTI/XXE/CRLF). Each draft includes title, severity with CVSS estimate, summary, steps to reproduce with two-step curl (no-auth probe + auth baseline for diff), impact statement specific to the finding, suggested fix from the snippet library, and references
-7. Fires a Chrome notification per critical: _"Hunt Mode found a Critical IDOR on /api/users — report draft ready"_
-8. Persists drafts to `chrome.storage.local` keyed by host (survive tab close + browser restart)
+3. **DOM auto-crawl** — walks every `<a href>`, `<form action>`, `<iframe src>`, `[routerLink]`, `[ng-href]`, `[to]`, `[data-href]` on the current page. Filters to same-origin URLs. Adds new ones to the probe queue. _Pure URL extraction — no clicking, no navigation, no session-changing side effects._
+4. Runs the full 36-step probe pipeline + 8 stack-aware attack packs
+5. Sweeps the **Authorization Matrix** across saved auth contexts
+6. Runs the chain correlator, filters by your scope rules
+7. **Drafts a complete HackerOne-format report for every Critical and High finding** — chains *and* individual high-severity findings (exposed secrets, JWT alg=none, confirmed SSTI/XXE/CRLF). Each draft includes title, severity with CVSS estimate, summary, steps to reproduce with two-step curl (no-auth probe + auth baseline for diff), impact statement specific to the finding, suggested fix from the snippet library, and references
+8. Fires a Chrome notification per critical: _"Hunt Mode found a Critical IDOR on /api/users — report draft ready"_
+9. Persists drafts to `chrome.storage.local` keyed by host (survive tab close + browser restart)
+
+The **Live tab** narrates every filter step in real time — chain count before/after scope filter, severity distribution, what got dropped and why. If the hunt finishes with 0 reports, a "Why no reports?" diagnostic walks you through every filter point with concrete suggestions ("uncheck Critical+High filter," "save 2+ auth contexts," "browse the target more first"). No more wondering why a hunt came up empty.
 
 **You wake up to a queue of pre-written bounty reports.** Read each, click Copy or Export, paste into your HackerOne / Bugcrowd / Intigriti submission.
 
@@ -99,7 +102,7 @@ This is the workflow Burp doesn't even attempt. Burp's Active Scanner runs attac
 
 > Set scope. Hit Start. Close the laptop. Wake up to a queue of drafted Criticals.
 
-### Quality controls (v6.2.2 — keep your reputation)
+### Quality controls — keep your reputation
 
 Hunt Mode actively filters false positives that would burn your reputation if submitted:
 
@@ -107,6 +110,7 @@ Hunt Mode actively filters false positives that would burn your reputation if su
 - **Benign Azure SAS tokens** — short-lived read-only SAS URLs for media (`image.jpg?sv=...&sp=r&se=...`) are legitimate CDN delivery, not credential leaks. Hunt Mode checks `sp=r` + media file extension + `se - st < 7 days` and suppresses. Long-lived, write-capable, or non-media SAS tokens still report as real leaks.
 - **Hash fragment normalization** — `/Dashboard#!/` is a client-side route, not a server endpoint. Hunt Mode strips hash fragments before chain analysis so the report shows `/Dashboard` (the actual server path).
 - **Real `baseUrl` in every curl** — the chain analyzer derives the target host from `tab.url` (HTTP/HTTPS only) with a fallback to the first observed endpoint. No more `https://target.tld` placeholder URLs in your reports.
+- **Transparent diagnostics** — every filter step (scope, severity, dedupe) logs its before/after counts in the live feed. When a hunt finishes with 0 reports, the feed ends with a "Why no reports?" block explaining exactly where every potential finding was dropped, with concrete next-step suggestions adapted to your specific config.
 
 ### A real Hunt Mode draft
 
@@ -246,6 +250,25 @@ Same data engine, three views. Pick whichever matches what you're doing.
 | 🔵 | **Blue** | Defenders / security review | Health score (0-100, strict — only criticals and highs count). Top 5 fixes prioritized by severity × ease, each with copy-paste snippets in Nginx / Apache / IIS / Express / Django / Laravel / Rails / ASP.NET. Observed-traffic CSP generator. 7-framework compliance audit. Snapshot & regression diff. Continuous monitor with Chrome notifications when new secrets leak. |
 
 Switch modes with the Classic / Red / Blue pill in the popup header. Each tab remembers which mode you were last in. Theme colors swap with the mode.
+
+---
+
+## Exports
+
+Click `Export ▾` in the popup header. Eight formats, two purposes:
+
+| Export | Includes credentials? | Use it for |
+|---|---|---|
+| **JSON (full data)** | ✅ Yes | Team-share format. Two hunters working the same target need shared auth contexts to reproduce findings. Send via Signal / encrypted channel. |
+| **📄 Full Report (.md)** | ❌ Redacted | Bounty submission, customer engagement, anywhere it leaves your team. Auth header values (Authorization, Cookie, X-API-Key, X-Auth-Token, X-CSRF-Token, X-Amz-Security-Token, etc.) replaced with `<redacted, N chars>`. Includes embedded Hunt Mode drafted reports, stack-attack pack hits, continuous monitor alerts, and Marked-as-Fixed triage state. |
+| **Burp URL list** | URL list only | Paste into Burp's target scope or feed to ffuf/nuclei |
+| **Param wordlist** | Names only | Fuzzing dictionaries — query params + form input names + hidden field names |
+| **Endpoints (txt)** | URL list only | Tab-separated method/status/path/host/tags/size — observed + discovered routes |
+| **🔧 Swagger Spec (.yaml)** | URL list only | Reconstructed OpenAPI 3.0 spec from observed traffic |
+| **🗺️ Source Maps (JSON)** | Source extracts only | Full parsed source maps with file trees, secrets, routes, env vars, dependencies |
+| **⚔️ Nuclei Templates (.yaml)** | Probe URLs only | Drop-in `~/.config/nuclei/custom/` for continuous scanning |
+
+The Markdown report is built for sharing — every credential gets redacted, the report header explicitly says so. The JSON is built for syncing with your hunting partner — every credential ships intact.
 
 ---
 
@@ -446,17 +469,17 @@ Floor at 10 so a catastrophic site reads "10/100", not "0/100" (which the user c
 
 ```
 PenScope/
-├── manifest.json              MV3 manifest, v6.2.2
-├── background.js              Service worker — webRequest, CDP, probe engine, chain analyzer, page-context runners, noisy-host shortcut (~6,300 lines)
+├── manifest.json              MV3 manifest, v6.2.5
+├── background.js              Service worker — webRequest, CDP, probe engine, chain analyzer, page-context runners, noisy-host shortcut, DOM-crawl handler (~6,400 lines)
 ├── popup.html                 Mode UI shell — three modes, glassmorphism dark theme (~350 lines)
-├── popup.js                   Renderers, mode router, weaponize panels, fix snippets, compliance, Hunt + Workbench launchers (~3,400 lines)
+├── popup.js                   Renderers, mode router, weaponize panels, fix snippets, compliance, Hunt + Workbench launchers, auth-redacted Markdown export (~3,500 lines)
 ├── content.js                 Content script — DOM scanning, secrets, hidden fields, forms, XSS sinks, benign-SAS filter, idle-deferred rescans (~720 lines)
 │
 ├── workbench.html             Workbench full-tab UI shell (~960 lines)
 ├── workbench.js               Workbench logic — Repeater/Intruder/Encoder/Diff/SiteMap/AuthCtx (~1,200 lines)
 │
-├── hunt.html                  Hunt Mode full-tab UI shell (~440 lines)
-├── hunt.js                    Hunt Mode orchestrator + report composer + finding fallback (~830 lines)
+├── hunt.html                  Hunt Mode full-tab UI shell + pre-flight indicator (~470 lines)
+├── hunt.js                    Hunt Mode orchestrator (DOM crawl + 36-step probe + Auth Matrix + chain analyzer + report composer + finding fallback + diagnostic logging) (~1,000 lines)
 │
 ├── red-attacks.js             Reference: STACK_ATTACK_PACKS (8 stacks)
 ├── blue-fixes.js              Reference: FIX_SNIPPETS (30+ remediation snippets)
@@ -464,7 +487,7 @@ PenScope/
 ├── blue-compliance.js         Reference: COMPLIANCE_MAP (7 frameworks)
 │
 ├── icons/                     16, 48, 128 px PNG
-├── CHANGELOG.md               Full version history v5.1 → v6.2.2
+├── CHANGELOG.md               Full version history v5.1 → v6.2.5
 ├── LICENSE                    MIT
 └── README.md                  You are here
 ```
