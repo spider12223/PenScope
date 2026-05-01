@@ -115,10 +115,57 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Initial: load any persisted reports for this host
   await loadReports();
 
+  // v6.2.4 — Pre-flight indicator. Shows the engine state before the user clicks
+  // Start, so they know whether they have enough captured surface for a productive
+  // hunt. Auto-refreshes when the user returns to the Setup tab. The Refresh button
+  // re-pulls in case the user browsed the target between opening Hunt Mode and
+  // clicking Start.
+  $('pfRefresh').addEventListener('click', refreshPreflight);
+  await refreshPreflight();
+
   // If a hunt is already running (e.g. user refreshed the page), refuse to restart;
   // background isn't tracking it (foreground orchestrator), so we just reset to idle.
   setStatus('idle', 'Idle');
 });
+
+async function refreshPreflight() {
+  try {
+    const state = await wbGetTabData();
+    const wbState = await new Promise(resolve => {
+      chrome.runtime.sendMessage({ action: 'wbGetState', tabId: SOURCE_TAB_ID }, r => {
+        void chrome.runtime.lastError;
+        resolve(r || {});
+      });
+    });
+    const epCount = (state.endpoints || []).length;
+    const secretsCount = (state.secrets || []).length;
+    const techCount = (state.techStack || []).length;
+    const authCtxCount = ((wbState.auth && wbState.auth.list) || []).length;
+    $('pfEndpoints').textContent = epCount;
+    $('pfSecrets').textContent = secretsCount;
+    $('pfTech').textContent = techCount;
+    $('pfAuthCtx').textContent = authCtxCount;
+
+    // Warning thresholds. Below 20 endpoints means the probe will have very thin
+    // surface to test against — this is the #1 reason a hunt finishes with 0 reports.
+    // The DOM-crawl step (added in v6.2.4) will harvest more URLs at hunt time, but
+    // the user should know upfront if their starting position is weak.
+    const warningEl = $('preflightWarning');
+    const warnings = [];
+    if (epCount < 20) {
+      warnings.push(`Only <strong>${epCount}</strong> endpoint${epCount===1?'':'s'} captured passively. Hunt Mode will run a DOM crawl step to harvest more from the page, but for the richest hunt: <strong>browse the target site for 30+ seconds</strong> (click links, log in, navigate routes, expand menus) before clicking Start. Then click ↻ to refresh this panel.`);
+    }
+    if (authCtxCount < 2) {
+      warnings.push(`Only <strong>${authCtxCount}</strong> auth context${authCtxCount===1?'':'s'} saved. Authorization Matrix needs 2+ contexts to surface IDOR/BAC anomalies — set them up in Workbench → Auth Contexts (log in as User A, save cookies; log in as Admin, save cookies). Then enable "Run Authorization Matrix sweep" in this Setup.`);
+    }
+    if (warnings.length) {
+      warningEl.style.display = '';
+      warningEl.innerHTML = '⚠ ' + warnings.join('<br><br>⚠ ');
+    } else {
+      warningEl.style.display = 'none';
+    }
+  } catch (e) { /* tab may have closed */ }
+}
 
 function switchSubtab(name) {
   activeSubtab = name;
@@ -129,6 +176,9 @@ function switchSubtab(name) {
   });
   document.querySelectorAll('.subtab').forEach(s => s.classList.toggle('active', s.id === 'sub-' + name));
   if (name === 'reports') loadReports();
+  // v6.2.4 — Refresh pre-flight indicator when the user returns to Setup. They may
+  // have browsed the target between hunts, picking up more endpoints.
+  if (name === 'setup' && typeof refreshPreflight === 'function') refreshPreflight();
 }
 
 function setStatus(kind, text) {
@@ -167,7 +217,8 @@ const HUNT_STEPS = [
   { id: 'init',     label: 'Bootstrap engine + capture passive state',          weight: 5 },
   { id: 'deep',     label: 'Enable Deep mode (CDP debugger)',                   weight: 3 },
   { id: 'wait',     label: 'Wait for passive scan to settle',                   weight: 5 },
-  { id: 'probe',    label: 'Run 36-step probe pipeline',                        weight: 47 },
+  { id: 'crawl',    label: 'DOM crawl — harvest URLs from anchors/forms/iframes', weight: 4 },
+  { id: 'probe',    label: 'Run 36-step probe pipeline',                        weight: 43 },
   { id: 'matrix',   label: 'Run Authorization Matrix sweep',                    weight: 20 },
   { id: 'analyze',  label: 'Run chain correlator + aggregate findings',         weight: 5 },
   { id: 'report',   label: 'Draft HackerOne-format reports for High+ findings', weight: 10 },
@@ -237,7 +288,54 @@ function finishHunt(reason) {
   else if (reason === 'error') setStatus('error', 'Error');
   else if (reason === 'stopped') setStatus('done', 'Stopped');
   const elapsed = Date.now() - HUNT_STATE.startTime;
-  feedLine('info', 'Hunt finished — ' + fmtTime(elapsed) + ' · ' + (HUNT_STATE.reports || []).length + ' reports drafted');
+  const reportCount = (HUNT_STATE.reports || []).length;
+  feedLine('info', `Hunt finished — ${fmtTime(elapsed)} · ${reportCount} report${reportCount===1?'':'s'} drafted`);
+
+  // v6.2.3 — "Why no reports?" diagnostic. The single most-confusing UX moment is
+  // "Hunt says Done but I see 0 reports". This block walks the diagnostic counters we
+  // accumulated through the loop and explains in plain English where every potential
+  // report got dropped, with concrete suggestions for what to change.
+  if (reportCount === 0 && HUNT_STATE._diagnostics) {
+    const d = HUNT_STATE._diagnostics;
+    feedLine('crit', '────────────────────────────────────────');
+    feedLine('crit', '  Why no reports were drafted:');
+    feedLine('crit', '────────────────────────────────────────');
+    if (d.rawChainCount === 0) {
+      feedLine('info', `  · Chain analyzer produced 0 chains. Chains form when probe results combine with secrets/endpoints/auth context — empty means no compound exploit paths were detected.`);
+    } else {
+      feedLine('info', `  · Chain analyzer produced ${d.rawChainCount} chain${d.rawChainCount===1?'':'s'} (${d.rawSeverityDist.critical} crit, ${d.rawSeverityDist.high} high, ${d.rawSeverityDist.medium} med, ${d.rawSeverityDist.low} low)`);
+    }
+    if (d.scopeDropped > 0) {
+      feedLine('info', `  · Scope filter dropped ${d.scopeDropped} chain${d.scopeDropped===1?'':'s'} (paths matched ${HUNT_STATE.config.outScope.length?'out-of-scope':'no in-scope'} rules)`);
+    }
+    if (d.passiveFindingsCount === 0 && d.secretsTotal > 0) {
+      feedLine('info', `  · Passive findings: ${d.secretsTotal} secret${d.secretsTotal===1?'':'s'} found, but ALL are below high severity → ineligible for individual-finding fallback (which only drafts critical/high)`);
+    } else if (d.passiveFindingsCount === 0) {
+      feedLine('info', `  · No high-severity passive findings (no exposed secrets, JWT alg=none, or confirmed SSTI/XXE/CRLF in scope)`);
+    }
+    if (HUNT_STATE.config.runAuthMatrix && d.matrixAdded === 0) {
+      feedLine('info', `  · Authorization Matrix added 0 anomalies — either no anomalies found, or matrix didn't run (need 2+ saved auth contexts)`);
+    } else if (!HUNT_STATE.config.runAuthMatrix) {
+      feedLine('info', `  · Authorization Matrix is disabled in this hunt (huge IDOR/BAC source — enable it in Setup if you have saved auth contexts)`);
+    }
+    feedLine('crit', '────────────────────────────────────────');
+    feedLine('crit', '  Try one of:');
+    feedLine('crit', '────────────────────────────────────────');
+    if (HUNT_STATE.config.chainOnly) {
+      feedLine('info', `  → Uncheck "Only Critical + High severity" in Setup to include medium/low findings`);
+    }
+    if (!HUNT_STATE.config.runAuthMatrix) {
+      feedLine('info', `  → Save 2+ auth contexts in Workbench → Auth Contexts, then re-hunt with the matrix enabled (catches IDOR/BAC)`);
+    }
+    if (HUNT_STATE.config.aggro === 'careful') {
+      feedLine('info', `  → Try aggression: Medium or Full Send (more probe steps run, more chains form). Check the bug bounty program's TOS first.`);
+    }
+    if (d.rawChainCount === 0 && (d.secretsTotal === 0)) {
+      feedLine('info', `  → Browse the target more before hunting (click links, log in, navigate routes) — PenScope only knows about endpoints it has captured passively`);
+    }
+    feedLine('info', `  → Open Classic mode to see the full unfiltered scan data, including everything below the report threshold`);
+  }
+
   loadReports();
 }
 
@@ -281,21 +379,59 @@ async function runHuntLoop() {
   setStep('wait', 'done', `${afterScan.endpoints.length} endpoints, ${afterScan.secrets.length} secrets, ${afterScan.techStack.length} tech detected`);
   if (HUNT_STATE.abortRequested) return;
 
+  // ---- Step 1.5: DOM auto-crawl (v6.2.4). PenScope's recursive probe step (#30)
+  // chains URLs found in API responses, but it doesn't read the actual page DOM.
+  // If the user opens a target's dashboard with 50 sidebar links, those URLs never
+  // make it into PenScope's discovery list — the probe has nothing to test against.
+  // This step injects a script that walks every <a href>, <form action>, <iframe src>,
+  // and SPA-router-style attributes ([routerLink], [ng-href], [to], [data-href]),
+  // filters to same-origin URLs, and feeds them into tab.discoveredRoutes so the
+  // probe step picks them up. Pure URL extraction — no clicking, no navigation, no
+  // session-changing side effects. ----
+  setStep('crawl', 'live');
+  feedLine('info', 'Crawling DOM for same-origin URLs (anchors, forms, iframes, SPA route attrs)...');
+  const crawlRes = await new Promise(resolve => {
+    chrome.runtime.sendMessage({ action: 'huntDomCrawl', tabId: SOURCE_TAB_ID }, r => {
+      void chrome.runtime.lastError;
+      resolve(r || {});
+    });
+  });
+  if (crawlRes.ok) {
+    const added = crawlRes.added || 0;
+    const total = crawlRes.totalSeen || 0;
+    setStep('crawl', 'done', `${added} new URL${added===1?'':'s'} added (${total} found in DOM)`);
+    feedLine('info', `DOM crawl: ${total} URLs found in page DOM, ${added} new (rest already known to PenScope)`);
+  } else {
+    setStep('crawl', 'done', 'failed: ' + (crawlRes.error || 'unknown'));
+    feedLine('crit', 'DOM crawl failed: ' + (crawlRes.error || 'unknown') + ' (continuing — probe will use existing endpoints only)');
+  }
+  if (HUNT_STATE.abortRequested) return;
+
   // ---- Step 2: probe pipeline ----
   if (cfg.runProbes) {
     setStep('probe', 'live');
     feedLine('info', 'Firing probe — this is the long step');
     const probeRes = await runProbeViaBackground(cfg);
     if (probeRes && probeRes.ok) {
-      const reqs = probeRes.results?.requests || 0;
-      setStep('probe', 'done', `${reqs} requests fired`);
-      feedLine('info', `Probe complete — ${reqs} requests, results in tab.probeData`);
+      const r = probeRes.results || {};
+      const reqs = r.requests || 0;
+      // Break down what the probe actually found by category. If reqs > 0 but every
+      // count below is 0, the user knows the probe ran but nothing was exploitable.
+      const breakdown = summarizeProbeResults(r);
+      setStep('probe', 'done', `${reqs} requests · ${breakdown.totalConfirmed} confirmed findings`);
+      feedLine('info', `Probe complete — ${reqs} requests fired`);
+      if (breakdown.totalConfirmed > 0) {
+        breakdown.lines.forEach(line => feedLine('info', '  · ' + line));
+      } else {
+        feedLine('info', '  · 0 confirmed exploitable findings from probe (target is well-secured, or aggression too low to trigger them)');
+      }
     } else {
       setStep('probe', 'done', 'failed: ' + (probeRes?.error || 'unknown'));
       feedLine('crit', 'Probe error: ' + (probeRes?.error || 'unknown') + ' (continuing with what we have)');
     }
   } else {
     setStep('probe', 'done', 'skipped (disabled in config)');
+    feedLine('info', 'Probe skipped — only passive findings will be drafted');
   }
   if (HUNT_STATE.abortRequested) return;
 
@@ -316,31 +452,67 @@ async function runHuntLoop() {
   // secrets, JWT tokens, etc.) that absolutely warrant a bounty report. Fall back to
   // wrapping those individual findings as chain-shaped objects so the report composer
   // can draft them.
+  //
+  // Every filter step below logs its before/after counts so users can see exactly why
+  // an item didn't make it to a report. The most common confusing outcome — "hunt
+  // says done but 0 reports" — is almost always the severity filter dropping mediums.
   setStep('analyze', 'live');
   const finalState = await wbGetTabData();
-  let chains = filterChainsByScope(finalState.chains || [], cfg);
+  const rawChains = finalState.chains || [];
+  feedLine('info', `Chain analyzer produced ${rawChains.length} compound chain${rawChains.length===1?'':'s'} from probe + passive data`);
+  if (rawChains.length === 0) {
+    feedLine('info', '  (chains form when probe results combine with secrets/endpoints/auth context — empty means no compound exploit paths detected)');
+  } else {
+    const sevDist = severityCounts(rawChains);
+    feedLine('info', `  Severity breakdown: ${sevDist.critical} critical · ${sevDist.high} high · ${sevDist.medium} medium · ${sevDist.low} low · ${sevDist.info} info`);
+  }
+
+  // Scope filter — silent in v6.2.x; now logs how many items were dropped and why
+  let chains = filterChainsByScope(rawChains, cfg);
+  const scopeDropped = rawChains.length - chains.length;
+  if (scopeDropped > 0) {
+    feedLine('info', `Scope filter: dropped ${scopeDropped} chain${scopeDropped===1?'':'s'} (paths matched ${cfg.outScope.length?'out-of-scope':'not in-scope'} rules)`);
+  } else if (rawChains.length > 0) {
+    feedLine('info', `Scope filter: all ${rawChains.length} chains in scope`);
+  }
 
   // Add HUNT_STATE-internal matrix anomalies (synthesized by runAuthMatrixSweep)
   const matrixChains = (HUNT_STATE.chains || []).filter(c => c && c.findingType === 'authz-matrix');
+  let matrixAdded = 0;
   matrixChains.forEach(mc => {
-    if (!chains.find(x => x.id === mc.id)) chains.push(mc);
+    if (!chains.find(x => x.id === mc.id)) { chains.push(mc); matrixAdded++; }
   });
+  if (matrixAdded > 0) feedLine('info', `Authorization Matrix added ${matrixAdded} authz-disagreement finding${matrixAdded===1?'':'s'}`);
 
   // Fallback: synthesize chain-shaped objects for individual high/critical findings
   // that aren't already represented in a chain. This catches the "Deep mode failed +
   // 3 passive secrets sitting there" case where the chain count is 0 but reportable
   // findings exist. Same scope filter applies.
   const passiveFindings = collectIndividualFindings(finalState, cfg);
+  if (passiveFindings.length > 0) {
+    const passSev = severityCounts(passiveFindings);
+    feedLine('info', `Individual findings (passive): ${passiveFindings.length} found · ${passSev.critical} critical · ${passSev.high} high (${(finalState.secrets||[]).length} total secrets in scope, only critical/high are eligible)`);
+  } else if ((finalState.secrets || []).length > 0) {
+    feedLine('info', `Individual findings: 0 high-severity (${(finalState.secrets||[]).length} secrets exist but all are below high severity, won't be drafted)`);
+  }
   passiveFindings.forEach(f => chains.push(f));
 
   // Severity filter: when chainOnly is on, restrict to Critical + High. Otherwise
   // include everything (some hunters prefer a full draft queue).
+  const beforeSev = chains.length;
   if (cfg.chainOnly) {
     chains = chains.filter(c => c.severity === 'critical' || c.severity === 'high');
+    const sevDropped = beforeSev - chains.length;
+    if (sevDropped > 0) {
+      feedLine('info', `Severity filter (Critical+High only): kept ${chains.length}, dropped ${sevDropped} medium/low${beforeSev > 0 && chains.length === 0 ? ' — uncheck "Only Critical + High" in Setup to include them' : ''}`);
+    }
+  } else {
+    feedLine('info', `Severity filter: off — including all severities (${chains.length} items)`);
   }
 
   // Final dedupe by id so a real chain and its corresponding individual finding don't
   // both produce reports.
+  const beforeDedup = chains.length;
   const seenIds = new Set();
   chains = chains.filter(c => {
     if (!c.id) return true;
@@ -348,10 +520,27 @@ async function runHuntLoop() {
     seenIds.add(c.id);
     return true;
   });
+  const dedupDropped = beforeDedup - chains.length;
+  if (dedupDropped > 0) feedLine('info', `Dedupe: removed ${dedupDropped} duplicate${dedupDropped===1?'':'s'} (chain + individual finding for same root)`);
 
   HUNT_STATE.chains = chains;
-  setStep('analyze', 'done', `${chains.length} reportable items in scope`);
-  feedLine('info', `Found ${chains.length} reportable items in scope (chains + individual high/critical findings)`);
+  HUNT_STATE._diagnostics = {
+    rawChainCount: rawChains.length,
+    rawSeverityDist: severityCounts(rawChains),
+    scopeDropped,
+    matrixAdded,
+    passiveFindingsCount: passiveFindings.length,
+    sevDropped: cfg.chainOnly ? (beforeSev - (cfg.chainOnly ? chains.length + dedupDropped : chains.length + dedupDropped)) : 0,
+    final: chains.length,
+    secretsTotal: (finalState.secrets || []).length,
+    matrixContexts: ((finalState.authContexts || []).length) || null,
+  };
+  setStep('analyze', 'done', `${chains.length} reportable item${chains.length===1?'':'s'}`);
+  if (chains.length === 0) {
+    feedLine('crit', `0 items survived all filters — see "Why no reports?" diagnostic at hunt completion below`);
+  } else {
+    feedLine('info', `✓ ${chains.length} item${chains.length===1?'':'s'} ready for report drafting`);
+  }
   if (HUNT_STATE.abortRequested) return;
 
   // ---- Step 5: draft reports ----
@@ -464,6 +653,66 @@ function collectIndividualFindings(state, cfg) {
   promote(state.probeData?.crlfResults, 'crlf', 'high', 'CRLF injection', 'Enables response splitting, cache poisoning, header injection.');
 
   return out;
+}
+
+// v6.2.3 — Diagnostic helpers for the live feed. The user reported "Hunt says done
+// but no reports" multiple times — the issue was always silent filter drops. These
+// helpers feed the rich logging in runHuntLoop and the "Why no reports?" diagnostic
+// in finishHunt.
+
+// Count chains by severity. Returns an object keyed by severity name.
+function severityCounts(items) {
+  const c = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  (items || []).forEach(it => {
+    const s = (it && it.severity) || 'info';
+    if (c[s] !== undefined) c[s]++;
+    else c.info++;
+  });
+  return c;
+}
+
+// Walk a probeData object and count "interesting" findings per category. Each probe
+// type has a different shape for "this is exploitable" so we centralize the logic.
+// Returns { totalConfirmed, lines: [string,...] } — lines are human-readable per-cat.
+function summarizeProbeResults(probeData) {
+  const lines = [];
+  let total = 0;
+  const add = (label, count) => {
+    if (count > 0) { lines.push(`${count} ${label}`); total += count; }
+  };
+  // authRemoval: severity-based (critical/high mean confirmed bypass)
+  const ar = (probeData.authRemovalResults || []).filter(r => r.severity === 'critical' || r.severity === 'high').length;
+  add('confirmed auth bypass', ar);
+  // BAC: vulnerable flag
+  const bac = (probeData.bacResults || []).filter(b => b.vulnerable).length;
+  add('confirmed BAC (broken access control)', bac);
+  // IDOR: sameBody === true means the auto-test confirmed identical responses across IDs
+  const idor = (probeData.idorAutoResults || []).filter(r => r.sameBody).length;
+  add('confirmed IDOR', idor);
+  // CORS: reflected origin + credentials = full SOP bypass
+  const cors = (probeData.corsResults || []).filter(r => r.reflected && r.allowsCredentials).length;
+  add('CORS reflection w/ credentials', cors);
+  // CSRF: medium+ severity = exploitable gap
+  const csrf = (probeData.csrfResults || []).filter(r => r.severity === 'critical' || r.severity === 'high' || r.severity === 'medium').length;
+  add('CSRF validation gaps', csrf);
+  // JWT alg=none confirmed
+  const jwt = (probeData.jwtAlgResults || []).filter(r => r.confirmed).length;
+  add('JWT alg=none accepts', jwt);
+  // SSTI / XXE / CRLF / proto pollution all use confirmed flag
+  add('confirmed SSTI', (probeData.sstiResults || []).filter(r => r.confirmed).length);
+  add('confirmed XXE', (probeData.xxeResults || []).filter(r => r.confirmed).length);
+  add('confirmed CRLF injection', (probeData.crlfResults || []).filter(r => r.confirmed).length);
+  add('confirmed prototype pollution', (probeData.protoPollution || []).filter(r => r.severity === 'critical' || r.severity === 'high').length);
+  // Open redirects
+  add('confirmed open redirect', (probeData.openRedirects || []).filter(r => r.confirmed).length);
+  // Recursive probe findings (any severity)
+  const rp = probeData.recursiveProbe || {};
+  const recFindings = ((rp.wave1 || []).concat(rp.wave2 || [], rp.wave3 || [])).flatMap(r => r.findings || []).filter(f => f.severity === 'critical' || f.severity === 'high').length;
+  add('high-severity findings in recursive probe responses', recFindings);
+  // Stack-attack pack hits (confirmed)
+  const stack = (probeData.stackAttacks || []).filter(a => a.confirmed && (a.severity === 'critical' || a.severity === 'high')).length;
+  add('confirmed stack-pack hits', stack);
+  return { totalConfirmed: total, lines };
 }
 
 // Filter chains by scope rules. A chain is in scope if any of its findings'

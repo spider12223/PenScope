@@ -5808,6 +5808,60 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse)=>{
       const url=chrome.runtime.getURL("hunt.html")+"?source="+msg.tabId;
       chrome.tabs.create({url}).then(t=>sendResponse({ok:true,tabId:t.id})).catch(e=>sendResponse({ok:false,error:e.message||String(e)}));
       return true;}
+    // v6.2.4 — Hunt Mode DOM crawl. Injects a page-context script that enumerates
+    // every URL referenced from the current DOM (anchors, forms, iframes, area tags,
+    // and common SPA router attributes), filters to same-origin, and feeds them into
+    // tab.discoveredRoutes so the probe step picks them up. Closes the gap where
+    // PenScope's recursive probe couldn't see UI-only links the user hadn't clicked.
+    case "huntDomCrawl":{
+      const tab=T(msg.tabId);
+      let origin="";try{if(tab.url)origin=new URL(tab.url).origin;}catch(e){}
+      // Fallback to first endpoint host when tab.url is unparseable (chrome:// pages,
+      // SPAs that haven't navigated yet, etc.). Without an origin we can't filter.
+      if(!origin){
+        const firstEp=(tab.endpoints||[]).find(e=>e&&e.url&&/^https?:/i.test(e.url));
+        if(firstEp){try{origin=new URL(firstEp.url).origin;}catch(e){}}
+      }
+      if(!origin){sendResponse({ok:false,error:"no usable origin"});return true;}
+      chrome.scripting.executeScript({target:{tabId:msg.tabId},world:"MAIN",func:__pageEnumerateDomUrls})
+        .then(inj=>{
+          const urls=(inj&&inj[0]&&inj[0].result)||[];
+          let added=0;
+          urls.forEach(u=>{
+            try{
+              const parsed=new URL(u);
+              if(parsed.origin!==origin)return;
+              const path=parsed.pathname+(parsed.search||"");
+              if(seen(msg.tabId,"dr","crawl:"+path))return;
+              tab.discoveredRoutes.push({path,source:"hunt-dom-crawl",type:"link",context:"discovered from page DOM"});
+              added++;
+            }catch(e){}
+          });
+          markDirty(msg.tabId);
+          sendResponse({ok:true,added,totalSeen:urls.length});
+        })
+        .catch(e=>{
+          // Try ISOLATED world fallback (some pages have CSP blocking MAIN world)
+          chrome.scripting.executeScript({target:{tabId:msg.tabId},func:__pageEnumerateDomUrls})
+            .then(inj2=>{
+              const urls=(inj2&&inj2[0]&&inj2[0].result)||[];
+              let added=0;
+              urls.forEach(u=>{
+                try{
+                  const parsed=new URL(u);
+                  if(parsed.origin!==origin)return;
+                  const path=parsed.pathname+(parsed.search||"");
+                  if(seen(msg.tabId,"dr","crawl:"+path))return;
+                  tab.discoveredRoutes.push({path,source:"hunt-dom-crawl",type:"link",context:"discovered from page DOM"});
+                  added++;
+                }catch(e){}
+              });
+              markDirty(msg.tabId);
+              sendResponse({ok:true,added,totalSeen:urls.length});
+            })
+            .catch(e2=>sendResponse({ok:false,error:e2.message||String(e2)}));
+        });
+      return true;}
     case "clearData":{const wasDeep=_debugTabs.has(msg.tabId);delete state[msg.tabId];if(_scripts[msg.tabId])_scripts[msg.tabId]=new Map();Object.keys(_seen).forEach(k=>{if(k.startsWith(`${msg.tabId}:`))delete _seen[k];});Object.keys(_pending).forEach(k=>{if(k.startsWith(`${msg.tabId}:`))delete _pending[k];});if(wasDeep)T(msg.tabId).deepEnabled=true;sendResponse({ok:true});return true;}
     case "reportContentScan":{const tabId=sender.tab?.id;if(tabId){const t=T(tabId);
       // Standard fields
@@ -6221,6 +6275,58 @@ async function __pageRunOneRequest(method,url,headers,body,ctxCookies){
     });
   }
   return result;
+}
+
+// v6.2.4 — DOM URL enumerator. Runs in the page context, walks every element type
+// that holds a URL (anchors, forms, iframes, area maps, embedded media, common SPA
+// router attributes), resolves relative URLs against the current location, and
+// returns a deduplicated array. Pure read — no DOM mutation, no clicks, no
+// navigation. Caller (huntDomCrawl message handler) filters to same-origin and
+// promotes new URLs into tab.discoveredRoutes for the probe to test.
+function __pageEnumerateDomUrls(){
+  const urls=new Set();
+  function add(u){
+    if(!u||typeof u!=="string")return;
+    if(u.startsWith("javascript:")||u.startsWith("data:")||u.startsWith("blob:")||u.startsWith("mailto:")||u.startsWith("tel:")||u.startsWith("#"))return;
+    try{urls.add(new URL(u,location.href).href);}catch(e){}
+  }
+  // Standard HTML elements with URL attributes
+  document.querySelectorAll("a[href]").forEach(a=>add(a.getAttribute("href")));
+  document.querySelectorAll("area[href]").forEach(a=>add(a.getAttribute("href")));
+  document.querySelectorAll("form[action]").forEach(f=>add(f.getAttribute("action")));
+  document.querySelectorAll("iframe[src]").forEach(i=>add(i.getAttribute("src")));
+  document.querySelectorAll("frame[src]").forEach(i=>add(i.getAttribute("src")));
+  document.querySelectorAll("embed[src]").forEach(e=>add(e.getAttribute("src")));
+  document.querySelectorAll("object[data]").forEach(o=>add(o.getAttribute("data")));
+  // Common SPA router attribute conventions
+  document.querySelectorAll("[ng-href]").forEach(e=>add(e.getAttribute("ng-href")));
+  document.querySelectorAll("[ui-sref]").forEach(e=>add("/"+e.getAttribute("ui-sref").replace(/\./g,"/")));
+  document.querySelectorAll("[routerLink]").forEach(e=>{
+    const v=e.getAttribute("routerLink");
+    // Angular routerLink can be a string or an array literal "['/path', 'arg']"
+    if(v&&v.startsWith("[")){try{const arr=JSON.parse(v.replace(/'/g,'"'));if(Array.isArray(arr))add(arr.filter(x=>typeof x==="string").join("/"));}catch(e){add(v);}}
+    else add(v);
+  });
+  document.querySelectorAll("[to]").forEach(e=>{
+    // Vue Router / React Router both use `to` for navigation links
+    const v=e.getAttribute("to");
+    if(v&&!v.startsWith("{"))add(v);  // skip "{ name: 'foo' }" object syntax
+  });
+  // Generic data-* attributes commonly used for client-side navigation
+  document.querySelectorAll("[data-href]").forEach(e=>add(e.getAttribute("data-href")));
+  document.querySelectorAll("[data-url]").forEach(e=>add(e.getAttribute("data-url")));
+  document.querySelectorAll("[data-link]").forEach(e=>add(e.getAttribute("data-link")));
+  document.querySelectorAll("[data-target-url]").forEach(e=>add(e.getAttribute("data-target-url")));
+  // SPA hash routes — extract from inline JS that pushes routes
+  // (e.g. #/dashboard, #!/admin patterns)
+  document.querySelectorAll("a[href^='#']").forEach(a=>{
+    const h=a.getAttribute("href");
+    if(/^#[!/]/.test(h)){
+      // Hash-bang or hash-slash route — strip the # for a server-relative path attempt
+      add(location.origin+"/"+h.replace(/^#[!/]+/,""));
+    }
+  });
+  return [...urls];
 }
 
 async function __pageRunStackAttacks(items,headers,stealth,baseUrl,symbolHints){

@@ -1,5 +1,154 @@
 # PenScope Changelog
 
+## v6.2.4 — Hunt Mode: DOM auto-crawl + pre-flight indicator
+
+User correctly pointed out that "Hunt" implied autonomous crawling, but Hunt Mode
+was only crawling at the API/source-map level (recursive probe step 30, swagger
+fetch, GraphQL introspection, smart suffix bruteforce) — it never read the actual
+page DOM. If you opened a target's dashboard cold and clicked Hunt, all the sidebar
+links, form actions, and SPA route attributes were invisible to the probe.
+
+### New Hunt step: DOM crawl
+
+Inserted between `wait` and `probe`. Injects a page-context script that walks every
+URL-bearing element type:
+
+- `<a href>`, `<area href>` — anchor links
+- `<form action>` — form submission targets
+- `<iframe src>`, `<frame src>`, `<embed src>`, `<object data>` — embedded resources
+- `[ng-href]`, `[ui-sref]`, `[routerLink]` — Angular router attributes (handles both string and array literal `routerLink="['/path', 'arg']"` forms)
+- `[to]` — Vue Router / React Router navigation
+- `[data-href]`, `[data-url]`, `[data-link]`, `[data-target-url]` — generic SPA conventions
+- `<a href="#/foo">`, `<a href="#!/foo">` — hash routes (extracted as server-relative paths)
+
+Filters to same-origin URLs (using a properly-validated `tab.url` origin with first-endpoint fallback). Adds new URLs to `tab.discoveredRoutes` with `source: "hunt-dom-crawl"`. The probe step then picks them up via the existing recursive discovery pipeline.
+
+**Pure URL extraction — no clicking, no navigation, no session-changing side effects.** Same trust model as passive content-script scanning.
+
+### Pre-flight indicator in Setup
+
+The Setup tab now shows the engine's current capture state inline, so users see whether they have enough surface for a productive hunt BEFORE clicking Start:
+
+```
+Pre-flight
+156 endpoints captured  ·  3 secrets  ·  4 tech detected  ·  2 auth contexts saved
+```
+
+When endpoint count is low (<20), a yellow warning appears suggesting the user browse the target site for 30+ seconds first. When auth contexts are sparse (<2), a separate warning explains the matrix needs them. Refresh button (`↻`) re-pulls the state without leaving the page.
+
+The indicator auto-refreshes every time the user returns to the Setup sub-tab, so they can browse the target → switch back to Hunt → see updated counts → start a richer hunt.
+
+### Result
+
+Same hunt on the same target, run cold (just-opened tab):
+
+**v6.2.3 behavior**: 12 endpoints captured, probe runs against thin surface, 0 reports drafted, diagnostic explains "browse the target first".
+
+**v6.2.4 behavior**: 12 endpoints captured + DOM crawl harvests 47 more from the page (sidebar nav, form actions, SPA routes), probe now has 59 endpoints to test, finds the actual auth-bypass endpoints, drafts the reports.
+
+The user no longer has to manually browse before hunting. PenScope sees what's on the page.
+
+### Caveats (planned for v6.3)
+
+DOM crawl extracts URLs that are *visible in the DOM*. It doesn't:
+- Follow client-side route navigations (link clicks that change the SPA view)
+- Submit forms to discover post-submit endpoints
+- Enumerate SPA routes registered with the framework router but not yet rendered
+
+Those are bigger asks (active navigation, framework introspection) and ship in v6.3.
+
+## v6.2.3 — Hunt Mode: rich diagnostic logging + "Why no reports?"
+
+User reported that Hunt Mode sometimes finishes with 0 reports drafted and gives no
+explanation why. Filter steps were silent — items got dropped at scope, severity, or
+dedupe stages without any visible trace, so the user couldn't tell whether the
+target was clean, the config was wrong, or PenScope was broken.
+
+### Live feed now narrates every filter step
+
+Each step in the hunt loop now logs its before/after counts and what got dropped:
+
+```
+Probe complete — 156 requests fired
+  · 4 confirmed BAC (broken access control)
+  · 2 confirmed IDOR
+  · 1 CORS reflection w/ credentials
+  · 0 confirmed SSTI / XXE / CRLF
+
+Chain analyzer produced 8 compound chains from probe + passive data
+  Severity breakdown: 0 critical · 2 high · 5 medium · 1 low · 0 info
+Scope filter: dropped 2 chains (paths matched out-of-scope rules)
+Authorization Matrix added 3 authz-disagreement findings
+Individual findings (passive): 1 found · 0 critical · 1 high (3 total secrets in scope)
+Severity filter (Critical+High only): kept 6, dropped 4 medium/low
+Dedupe: removed 1 duplicate (chain + individual finding for same root)
+✓ 5 items ready for report drafting
+```
+
+Or when the probe came up empty:
+
+```
+Probe complete — 156 requests fired
+  · 0 confirmed exploitable findings from probe (target is well-secured,
+    or aggression too low to trigger them)
+```
+
+### "Why no reports?" final diagnostic
+
+When the hunt finishes with 0 reports, the feed now ends with a structured
+explanation walking every filter point and concrete suggestions:
+
+```
+────────────────────────────────────────
+  Why no reports were drafted:
+────────────────────────────────────────
+  · Chain analyzer produced 0 chains. Chains form when probe results combine with
+    secrets/endpoints/auth context — empty means no compound exploit paths.
+  · Passive findings: 3 secrets found, but ALL are below high severity →
+    ineligible for individual-finding fallback (which only drafts critical/high)
+  · Authorization Matrix is disabled in this hunt (huge IDOR/BAC source —
+    enable it in Setup if you have saved auth contexts)
+
+────────────────────────────────────────
+  Try one of:
+────────────────────────────────────────
+  → Uncheck "Only Critical + High severity" in Setup to include medium/low findings
+  → Save 2+ auth contexts in Workbench → Auth Contexts, then re-hunt with
+    matrix enabled (catches IDOR/BAC)
+  → Try aggression: Medium or Full Send (more probe steps run, more chains form).
+    Check the bug bounty program's TOS first.
+  → Browse the target more before hunting (click links, log in, navigate routes)
+    — PenScope only knows about endpoints it has captured passively
+  → Open Classic mode to see the full unfiltered scan data
+```
+
+The diagnostic adapts to what actually happened in this specific hunt — if scope
+dropped chains, it says so. If chainOnly dropped mediums, it says so. If the user
+already enabled the matrix, it doesn't suggest enabling it again.
+
+### Implementation
+
+Two new helpers in `hunt.js`:
+
+- `severityCounts(items)` — returns `{critical, high, medium, low, info}` count map
+- `summarizeProbeResults(probeData)` — walks every probe-result category (BAC, IDOR,
+  CORS, JWT, SSTI, XXE, CRLF, proto pollution, open redirect, recursive findings,
+  stack-attack hits) with the right per-category "is confirmed" predicate and
+  returns `{totalConfirmed, lines}` for the feed.
+
+The hunt loop populates `HUNT_STATE._diagnostics` with raw chain count, severity
+distribution, scope-dropped count, matrix-added count, passive-finding count,
+severity-filter drops, and total secrets. `finishHunt` reads this and composes the
+"Why no reports?" block when `reports.length === 0`.
+
+### Result
+
+The "Hunt says done but I see 0 reports" mystery is over. Every empty result now
+comes with a complete trace of where every potential report got dropped, plus
+concrete next-step suggestions — so users immediately know whether to change config,
+gather more passive data, save auth contexts, or accept that the target is just
+genuinely well-secured.
+
 ## v6.2.2 — Hunt Mode: report quality + false-positive filters
 
 User exported drafts from a real Hunt Mode run on a government LMS and immediately

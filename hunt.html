@@ -300,6 +300,22 @@
         </div>
       </div>
 
+      <!-- v6.2.4 — Pre-flight panel. Shows the engine's current capture state before
+           the user starts the hunt, so they can see whether they have enough surface
+           for a meaningful run. Updates on tab focus + after the DOM crawl step
+           runs (so re-opening Setup after a hunt shows the new endpoint pool). -->
+      <div id="preflightPanel" style="margin-top:24px;padding:14px 16px;background:var(--glass);border:1px solid var(--glassbrd);border-radius:10px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+        <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;font-weight:700">Pre-flight</div>
+        <div style="flex:1;display:flex;gap:18px;flex-wrap:wrap">
+          <span style="font-family:var(--mono);font-size:11px;color:var(--t2)"><span style="color:var(--blue);font-weight:700" id="pfEndpoints">—</span> endpoints captured</span>
+          <span style="font-family:var(--mono);font-size:11px;color:var(--t2)"><span style="color:var(--red);font-weight:700" id="pfSecrets">—</span> secrets</span>
+          <span style="font-family:var(--mono);font-size:11px;color:var(--t2)"><span style="color:var(--purple);font-weight:700" id="pfTech">—</span> tech detected</span>
+          <span style="font-family:var(--mono);font-size:11px;color:var(--t2)"><span style="color:var(--teal);font-weight:700" id="pfAuthCtx">—</span> auth contexts saved</span>
+        </div>
+        <button class="btn" id="pfRefresh" title="Refresh pre-flight state">↻</button>
+      </div>
+      <div id="preflightWarning" style="display:none;margin-top:10px;padding:12px 14px;background:rgba(255,197,58,.10);border:1px solid rgba(255,197,58,.35);border-radius:8px;font-size:11px;color:var(--yellow);line-height:1.55"></div>
+
       <div class="start-area">
         <button class="btn-hunt" id="huntStartBtn"><span class="btn-hunt-ic">▶</span><span>Start Hunt</span></button>
         <button class="btn-secondary" id="huntStopBtn" style="display:none">Stop Hunt</button>

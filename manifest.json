@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PenScope",
-  "version": "6.2.2",
+  "version": "6.2.4",
   "description": "Bug bounty toolkit in Chrome — Hunt Mode (autonomous attacker) + Workbench (Repeater/Intruder/Encoder/Diff/SiteMap/AuthMatrix) + 36 probe attacks + chain correlator + Red/Blue/Classic modes. Free, faster than Burp.",
   "permissions": ["webRequest","activeTab","scripting","tabs","cookies","debugger","notifications","alarms","storage"],
   "host_permissions": ["<all_urls>"],
