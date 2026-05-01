@@ -1,5 +1,218 @@
 # PenScope Changelog
 
+## v6.2.2 — Hunt Mode: report quality + false-positive filters
+
+User exported drafts from a real Hunt Mode run on a government LMS and immediately
+spotted four bugs that would have made the reports embarrassing to submit. Real
+critical findings were buried in noise. Fixed each one.
+
+### Bug 1 (CRITICAL): repro curls used placeholder `https://target.tld`
+
+The chain analyzer's `baseUrl` derivation used a fragile string-split that fell back
+to `"https://target.tld"` when `tab.url` was unparseable or empty. Every drafted
+report's curl pointed at a domain that doesn't exist — anyone trying to reproduce
+would hit `ERR_NAME_NOT_RESOLVED`.
+
+**Fix**: proper URL parsing via `new URL(tab.url).origin`, with a fallback to the
+first observed endpoint's host. Final fallback is the obviously-fake string
+`https://<TARGET-HOST-NOT-DETECTED>` so the failure is visible rather than silent.
+
+### Bug 2: SPA HTML shells flagged as auth bypass
+
+`/app/dashboard/index.html`, `/app/dashboard/notsubmittedactivities.html`, etc. all
+got drafted as Critical auth bypasses because `authRemovalResults` showed they
+returned 200 to no-auth requests with `sameBody=true`. **That's normal SPA behavior**
+— Angular/React/Vue apps serve the same bootstrap HTML to every visitor and handle
+auth client-side after the JS loads. Submitting any of these to a bounty program
+would burn reputation.
+
+**Fix**: in the auth-bypass chain pattern, filter out paths where `path` ends with
+`.html` AND `sameBody === true`. Real APIs (`/api/*`, `/v1/*`) keep their reportable
+status. Out of 12 reports the user got from one hunt, this filter would have removed
+7 false positives.
+
+### Bug 3: Azure SAS tokens for media flagged as exposed credentials
+
+The "Azure SAS" pattern matched URLs like `image.jpg?sv=...&sp=r&se=...` and drafted
+them as High-severity credential leaks. But these are **short-lived read-only media
+delivery URLs** — exactly how SAS tokens are designed to work for serving images
+from Azure Blob Storage. Flagging them is a category error.
+
+**Fix**: new `isBenignAzureSas(value, context)` heuristic in `content.js` checks:
+- `sp=r` (read-only)
+- File extension before `?` matches media (`.jpg`, `.png`, `.svg`, `.webp`, `.mp4`,
+  `.woff2`, `.css`, etc.)
+- Time window `se - st < 7 days`
+
+If all three match → finding is suppressed. A real leak (long-lived, write-capable,
+or pointing to data files) still fires.
+
+### Bug 4: Paths included hash fragments
+
+`/Dashboard#!/` was being treated as a unique server path. Hash fragments are
+client-side only — never sent to the server.
+
+**Fix**: `cleanPath()` helper in the chain analyzer strips everything from `#`
+onward before pattern matching. The same path with multiple hash variants now
+collapses to one entry.
+
+### Improved repro commands
+
+Auth-bypass curl commands now show BOTH the unauthenticated probe AND the
+authenticated baseline for direct comparison:
+
+```bash
+# Verify unauthenticated access
+curl -i "https://lms.moe.gov.ae/api/DashboardApi/getUsefulLinks"
+
+# Compare to authenticated baseline (paste your real cookies):
+curl -i "https://lms.moe.gov.ae/api/DashboardApi/getUsefulLinks" -b "session=..."
+```
+
+Plus a stronger "Diff the response bodies" step in the next-steps list — `sameBody=false`
+isn't always proof of bypass; sometimes the no-auth response is just `401 Unauthorized`
+JSON which differs from the auth response without being a vuln.
+
+### Result
+
+The same hunt that previously produced 12 reports (8 false positives, 4 real)
+should now produce ~4 reports — only the genuinely reportable ones. Curls will
+have the real target host. Users won't burn reputation on noise.
+
+## v6.2.1 — Hunt Mode: auto-Deep + finding fallback
+
+User shipped a hunt on a real target and got `0 reports` despite 3 confirmed
+high-severity secrets in the engine. Two real bugs.
+
+### Bug 1: Hunt Mode didn't auto-enable Deep mode
+
+The probe step requires CDP debugger attach. v6.2.0 assumed the user had toggled Deep
+in the popup before opening Hunt Mode. Most users won't — they'll click the Hunt
+button cold. Without Deep, the probe step bailed with `Probe error: Deep mode
+required`, and since the chain analyzer mostly emits chains from probe results, 0
+chains formed. 0 chains × `chainOnly: true` = 0 reports.
+
+**Fix**: added a new `deep` step (between `init` and `wait`) that calls `enableDeep`
+automatically. The `debugger` permission is granted at install time so attach happens
+silently — no user prompt, no friction. If attach fails (chrome:// page, debugger
+already held by another extension), Hunt continues with passive findings only and
+surfaces the failure clearly in the live feed.
+
+### Bug 2: No fallback to individual findings
+
+Even when 3 critical secrets sat in `tab.secrets`, Hunt Mode reported 0 because the
+chain correlator only counts compound chains. v6.2.0 had no path from "individual
+high-severity finding" → "drafted report".
+
+**Fix**: new `collectIndividualFindings(state, cfg)` helper synthesizes chain-shaped
+objects from passive findings that warrant a bounty report on their own:
+
+- Secrets with `severity: critical | high` → wrapped with full source + value preview
+- JWT `alg=none` confirmed accepts → wrapped as critical with forge-PoC repro
+- Confirmed SSTI / XXE / CRLF probe results → wrapped at appropriate severity
+
+Each synthesized object passes through the same `composeReport` function as real
+chains — produces full HackerOne-format markdown identical in shape to compound-chain
+reports.
+
+Scope filter applies to synthesized findings too. Final dedupe by `id` so a real
+chain and its corresponding individual finding don't both produce reports.
+
+### UX clarification
+
+Renamed the `chainOnly` checkbox label from "Only draft reports for Critical + High
+chains" → "Only Critical + High severity" (with clearer hint). The semantics changed
+slightly — now it filters by severity across BOTH chains and individual findings,
+which is what users actually want.
+
+### Result
+
+The same hunt that previously produced 0 reports on a target with 3 exposed secrets
+now produces 3 drafted reports (one per secret) — plus any chains the analyzer
+surfaces from the now-running probe.
+
+## v6.2.0 — Hunt Mode
+
+The category leap. Hunt Mode turns PenScope from "tool you use" into "agent that hunts while you sleep."
+
+Click **🎯 Hunt** in the popup header. Configure scope (in-scope paths, out-of-scope paths, aggression, time budget). Click Start. PenScope autonomously:
+
+1. Settles passive recon
+2. Runs the full 36-step probe pipeline + 8 stack-aware attack packs
+3. Sweeps the **Authorization Matrix** across saved auth contexts (every endpoint × every user → IDOR/BAC anomalies)
+4. Runs the chain correlator, filters chains by your scope rules
+5. **Drafts a complete HackerOne-format report for every Critical and High chain** — title, severity with CVSS estimate, summary, steps to reproduce with curl, impact statement specific to the chain, suggested fix from the blue-fixes library, and references
+6. Fires a Chrome notification per critical: _"Hunt Mode found a Critical IDOR on /api/users — report draft ready"_
+7. Persists drafts to `chrome.storage.local` keyed by host (survive tab close + browser restart)
+
+You wake up to a queue of pre-written bounty reports. Read each, click Copy or Export, paste into your H1/Bugcrowd submission.
+
+### What's in the box
+
+**Hunt UI** (`hunt.html` + `hunt.js`, ~1,200 LOC) — three sub-tabs:
+
+- **Setup** — target URL (auto-filled from active tab), in-scope/out-of-scope glob patterns (Burp-style with `*` and `**`), aggression pill (Careful / Medium / Full Send), time budget (5/15/30/60 min), per-module toggles (probes / stack packs / auth matrix / chain-only filter / notifications)
+- **Live** — real-time progress bar, 7-step list with done/live/pending icons, 5 stat cards (endpoints / requests / findings / chains / drafts), live event feed
+- **Reports** — list of drafts color-coded by severity, click any to view in modal with Copy / Export `.md` / Delete actions. Bulk Export All as combined Markdown.
+
+**Scope filtering** — glob-based in/out scope rules. A chain is in scope if any finding path matches in-scope AND no finding path matches out-of-scope. Empty in-scope = all paths considered in.
+
+**Report composer** — full HackerOne-format markdown:
+
+```
+# [Chain title]
+
+**Severity:** HIGH (CVSS estimate: 7.0–8.9)
+**Confidence:** 85%
+**Target:** https://...
+**Discovered:** [ISO timestamp]
+**Detected by:** PenScope v6.2 Hunt Mode (chain pattern: ...)
+
+## Summary
+[Chain summary + finding breakdown]
+
+## Steps to reproduce
+```bash
+[curl from chain.reproCmd]
+```
+[Additional verification steps]
+
+## Impact
+[Severity-appropriate statement + chain-specific specifics
+ (privilege escalation, IDOR, RCE, credential exposure, CSRF)]
+
+## Suggested fix
+[Pulled from chain-type → fix mapping (10+ patterns covered)]
+
+## Detection methodology
+[How PenScope correlated the signals]
+
+## References
+[OWASP, CWE, fix-specific links]
+```
+
+**Authorization Matrix integration** — when 2+ auth contexts are saved (in the Workbench), Hunt Mode runs the matrix as part of the loop. Anomalies (different status codes per context) get synthesized into chain-shaped findings and feed the report composer. Severity heuristic: anonymous-can-access-but-others-can't, or multi-role-all-200, escalates to High.
+
+**Chrome notifications** — fires on Critical / High chain detection via `chrome.notifications.create`. Uses the existing `notifications` permission. Optional toggle in Setup.
+
+**Persistence** — reports keyed by `ps:hunt:<host>` in `chrome.storage.local`. Capped 100 per host (FIFO). Dedup by `chainId` so re-runs of the same chain replace rather than duplicate.
+
+### Architecture notes
+
+- Orchestrator runs in the foreground hunt page (not in the background SW). Pros: simple, reliable, observable. Cons: aborts if the user closes the tab. Background-driven persistence across tab close planned for v6.2.1.
+- Reuses every existing engine piece: `startProbe` for the 36-step pipeline (which auto-fires stack packs in red mode), `wbSendRequest` for matrix cells, `getData` for chain analyzer output. Hunt Mode is pure orchestration over existing primitives — adds ~1,200 LOC of UI + report composition, doesn't fork the engine.
+- Reports are pure functions of `(chain, state, config)` — same chain always produces the same report. No randomness. Reproducible.
+- Time budget = hard timeout. Hits it → finishHunt('stopped'). Whatever drafts exist persist.
+
+### What this changes for the user
+
+Bug bounty hunting becomes **passive**. Set scope on a target you have permission to test, hit Start Hunt, close the laptop. Wake up to:
+
+- A Chrome notification (or several): _"Hunt Mode found a Critical IDOR on `/api/orders/:id`"_
+- A queue of full bounty reports in the Hunt → Reports tab, ready to paste into HackerOne
+
+Burp doesn't ship this. Burp's Active Scanner runs attacks but doesn't compose bounty reports. PenScope owns the entire workflow from scan → exploit → report → submit.
+
 ## v6.1.1 — Performance: don't lag YouTube
 
 User reported PenScope made YouTube noticeably laggy. Confirmed two real hot paths

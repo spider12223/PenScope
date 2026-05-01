@@ -50,6 +50,20 @@ if(btnWb){
     });
   });
 }
+// v6.2 — Hunt button opens autonomous Hunt Mode. Same launching pattern as Workbench:
+// background creates the tab so the source tab ID flows via URL params. The hunt page
+// orchestrates the full pipeline and persists drafted reports to chrome.storage.local.
+const btnHunt=document.getElementById("btnHunt");
+if(btnHunt){
+  btnHunt.addEventListener("click",()=>{
+    if(!tabId){toast("No active tab");return;}
+    chrome.runtime.sendMessage({action:"huntOpen",tabId},r=>{
+      const err=chrome.runtime.lastError;
+      if(err){toast("Couldn't open Hunt Mode: "+(err.message||"runtime error"));return;}
+      if(!r||!r.ok)toast("Couldn't open Hunt Mode"+(r&&r.error?": "+r.error:""));
+    });
+  });
+}
 chrome.runtime.sendMessage({action:"runScan",tabId},()=>setTimeout(load,600));chrome.runtime.sendMessage({action:"getCookies",tabId});document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".tc").forEach(x=>x.classList.remove("active"));t.classList.add("active");document.getElementById(`t-${t.dataset.t}`).classList.add("active");}));document.getElementById("btnScan").addEventListener("click",()=>{chrome.runtime.sendMessage({action:"runScan",tabId},()=>setTimeout(load,800));});document.getElementById("btnClear").addEventListener("click",()=>{chrome.runtime.sendMessage({action:"clearData",tabId},()=>load());});document.getElementById("btnClaude").addEventListener("click",sendToClaude);document.getElementById("btnDeep").addEventListener("click",toggleDeep);const expBtn=document.getElementById("btnExport"),expMenu=document.getElementById("exportMenu");expBtn.addEventListener("click",e=>{e.stopPropagation();expMenu.classList.toggle("show");});document.addEventListener("click",()=>expMenu.classList.remove("show"));expMenu.querySelectorAll(".exp-item").forEach(i=>i.addEventListener("click",e=>{e.stopPropagation();exportData(i.dataset.fmt);expMenu.classList.remove("show");}));document.getElementById("fE").addEventListener("input",e=>renderEndpoints(D?.endpoints||[],e.target.value));document.getElementById("fL").addEventListener("input",e=>renderLinks(D?.links||[],e.target.value));document.getElementById("fC").addEventListener("input",e=>renderConsole(e.target.value));document.getElementById("btnProbe").addEventListener("click",toggleProbe);
 // Deep dropdown
 const deepDropBtn=document.getElementById("btnDeepDrop"),deepMenu=document.getElementById("deepMenu");

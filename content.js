@@ -176,7 +176,63 @@ const GLOBAL_KEYS=["__NEXT_DATA__","__NUXT__","__INITIAL_STATE__","__PRELOADED_S
 // ============================================================
 // EXISTING SCANNERS (from MAXED)
 // ============================================================
-function scanSecrets(){const results=[],seen=new Set(),texts=[];document.querySelectorAll("script:not([src])").forEach(s=>{if(s.textContent.trim().length>0)texts.push({source:"inline-script",content:s.textContent});});texts.push({source:"page-html",content:(document.body?document.body.innerHTML:"").substring(0,PS_CONFIG.HTML_SCAN_LIMIT)});document.querySelectorAll("meta").forEach(m=>{const c=m.getAttribute("content")||"",n=m.getAttribute("name")||m.getAttribute("property")||"";if(c.length>8)texts.push({source:`meta[${n}]`,content:c});});document.querySelectorAll("noscript").forEach(ns=>{if(ns.textContent.trim().length>10)texts.push({source:"noscript",content:ns.textContent});});document.querySelectorAll("template").forEach(tpl=>{if(tpl.innerHTML.trim().length>10)texts.push({source:"template",content:tpl.innerHTML});});texts.forEach(({source,content})=>{SECRETS.forEach(pat=>{pat.regex.lastIndex=0;let match,count=0;while((match=pat.regex.exec(content))!==null&&count<PS_CONFIG.SECRET_MATCH_LIMIT){count++;const val=match[1]||match[0],key=`${pat.name}:${val.substring(0,40)}`;if(seen.has(key))continue;seen.add(key);const s=Math.max(0,match.index-40),e=Math.min(content.length,match.index+match[0].length+40);results.push({type:pat.name,value:val.substring(0,150),severity:pat.sev,source,context:content.substring(s,e).replace(/[\n\r]/g," ").substring(0,200)});}});});return results;}
+// v6.2.2 — Heuristic for benign Azure SAS tokens. Real-world SAS tokens used for
+// short-lived read-only media delivery (image/video/font CDN URLs in Azure Blob
+// Storage) are NOT vulnerabilities — they're how SAS tokens are designed to work.
+// A leak only matters when the SAS is long-lived OR write-capable OR points to
+// non-media data. Returns true if the finding looks benign and should be filtered out.
+function isBenignAzureSas(value, context){
+  const blob = ((value || '') + ' ' + (context || '')).toLowerCase();
+  // Read-only check — `sp=r` (or `sp=rl`, `sp=rt`) means the holder can only read.
+  const readOnly = /[?&]sp=r[^a-z]|[?&]sp=rl|[?&]sp=rt/.test(blob);
+  if (!readOnly) return false;
+  // Media file extension immediately before the `?`
+  const mediaExt = /\.(?:jpg|jpeg|png|gif|svg|webp|bmp|ico|mp4|m4a|mp3|webm|mov|wav|ogg|flac|woff2?|ttf|otf|eot|pdf|css)\?/.test(blob);
+  if (!mediaExt) return false;
+  // Time window check — extract `st=...&se=...` and compute duration
+  const stMatch = /[?&]st=([0-9t:%a-z\-]+)/i.exec(blob);
+  const seMatch = /[?&]se=([0-9t:%a-z\-]+)/i.exec(blob);
+  if (stMatch && seMatch) {
+    try {
+      const st = new Date(decodeURIComponent(stMatch[1])).getTime();
+      const se = new Date(decodeURIComponent(seMatch[1])).getTime();
+      const hours = (se - st) / 3600000;
+      // Less than 7 days = legitimate short-lived delivery URL. Longer = probably a leak.
+      if (hours > 0 && hours < 24 * 7) return true;
+    } catch (e) { return true; }  // unparseable date — be conservative, treat as benign
+  } else {
+    // No time bounds and read-only media — still likely benign (just no-expiry CDN)
+    return true;
+  }
+  return false;
+}
+
+function scanSecrets(){
+  const results=[],seen=new Set(),texts=[];
+  document.querySelectorAll("script:not([src])").forEach(s=>{if(s.textContent.trim().length>0)texts.push({source:"inline-script",content:s.textContent});});
+  texts.push({source:"page-html",content:(document.body?document.body.innerHTML:"").substring(0,PS_CONFIG.HTML_SCAN_LIMIT)});
+  document.querySelectorAll("meta").forEach(m=>{const c=m.getAttribute("content")||"",n=m.getAttribute("name")||m.getAttribute("property")||"";if(c.length>8)texts.push({source:`meta[${n}]`,content:c});});
+  document.querySelectorAll("noscript").forEach(ns=>{if(ns.textContent.trim().length>10)texts.push({source:"noscript",content:ns.textContent});});
+  document.querySelectorAll("template").forEach(tpl=>{if(tpl.innerHTML.trim().length>10)texts.push({source:"template",content:tpl.innerHTML});});
+  texts.forEach(({source,content})=>{
+    SECRETS.forEach(pat=>{
+      pat.regex.lastIndex=0;
+      let match,count=0;
+      while((match=pat.regex.exec(content))!==null&&count<PS_CONFIG.SECRET_MATCH_LIMIT){
+        count++;
+        const val=match[1]||match[0],key=`${pat.name}:${val.substring(0,40)}`;
+        if(seen.has(key))continue;
+        seen.add(key);
+        const s=Math.max(0,match.index-40),e=Math.min(content.length,match.index+match[0].length+40);
+        const ctx=content.substring(s,e).replace(/[\n\r]/g," ").substring(0,200);
+        // v6.2.2 — Filter benign Azure SAS (short-lived read-only media URLs)
+        if(pat.name==="Azure SAS"&&isBenignAzureSas(val,ctx))continue;
+        results.push({type:pat.name,value:val.substring(0,150),severity:pat.sev,source,context:ctx});
+      }
+    });
+  });
+  return results;
+}
 
 function scanDOMElements(){const allElements=document.querySelectorAll("*");const hiddenFields=[];const inlineHandlers=[];const events=["onclick","onmouseover","onerror","onload","onfocus","onblur","onsubmit","onchange","oninput","onkeyup","onkeydown","onkeypress","ondblclick","oncontextmenu","onmouseenter","onmouseleave","ondrag","ondrop","onpaste","oncopy","onmessage"];const skip=["data-reactid","data-react-","data-v-","data-ng-","data-bs-","data-toggle","data-target","data-dismiss","data-slide","data-ride","data-svelte-h","data-astro-cid","data-lit-","data-testid","data-cy","data-qa","data-emotion","data-styled","data-radix","data-reactroot","data-placement","data-original-title"];allElements.forEach(el=>{Array.from(el.attributes).filter(a=>a.name.startsWith("data-")&&a.value&&a.value.length>15).forEach(a=>{if(!skip.some(s=>a.name.startsWith(s))){hiddenFields.push({name:a.name,value:a.value.substring(0,300),element:el.tagName.toLowerCase(),source:"data-attr"});}});events.forEach(attr=>{const val=el.getAttribute(attr);if(val)inlineHandlers.push({event:attr,element:el.tagName.toLowerCase(),code:val.substring(0,200),id:el.id||""});});});return{hiddenFields,inlineHandlers};}
 

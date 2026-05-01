@@ -5302,7 +5302,25 @@ function analyzeExploitChains(tabId){
   // stack trace for debugging. The trade-off: one bad pattern kills chains that would've been
   // produced by later patterns. In practice, if one pattern has a bug it's almost always a dev
   // issue that should be fixed, not worked around silently.
-  const baseUrl=(tab.url||"").split("/").slice(0,3).join("/")||"https://target.tld";
+  // v6.2.2 — Robust baseUrl derivation. The previous string-split approach produced
+  // "https://target.tld" placeholder when tab.url was empty, missing, or the popup
+  // hadn't yet flushed it — making every chain's reproCmd unusable. Now: try tab.url
+  // first via proper URL parsing; if that fails (or returns a non-HTTP origin like
+  // chrome://newtab, about:blank, or "null"), derive from the first observed endpoint's
+  // host; final fallback is a clearly-labeled placeholder so users can spot the failure
+  // rather than copy-paste a fake URL into their bug report.
+  function isUsableOrigin(o){return typeof o==="string"&&/^https?:\/\//i.test(o);}
+  let baseUrl="";
+  try{if(tab.url){const o=new URL(tab.url).origin;if(isUsableOrigin(o))baseUrl=o;}}catch(e){}
+  if(!baseUrl){
+    const firstEp=(tab.endpoints||[]).find(e=>e&&e.url&&/^https?:/i.test(e.url));
+    if(firstEp){try{const o=new URL(firstEp.url).origin;if(isUsableOrigin(o))baseUrl=o;}catch(e){}}
+  }
+  if(!baseUrl)baseUrl="https://<TARGET-HOST-NOT-DETECTED>";
+  // v6.2.2 — Strip hash fragments from paths. `/Dashboard#!/` is a client-side route,
+  // not a server path. Treating the hash as part of the URL produces nonsense findings
+  // like "auth bypass on /Dashboard#!/" when the actual server endpoint is /Dashboard.
+  function cleanPath(p){if(!p)return p;const h=p.indexOf("#");return h>=0?p.substring(0,h):p;}
   const authCookie=(tab.cookies||[]).filter(c=>/identity|idsrv|session|auth|token|jwt|cookie/i.test(c.name)).slice(0,3).map(c=>`${c.name}=${(c.value||"").substring(0,50)}`).join("; ");
   const cookieFlag=authCookie?`-b "${authCookie}"`:"";
 
@@ -5310,18 +5328,31 @@ function analyzeExploitChains(tabId){
   // If probe found a path that returns 200 without auth AND the path name suggests sensitive
   // data (admin/user/billing/config), that's a critical chain — not just "missing auth" in the
   // abstract, but "missing auth on a path that obviously matters."
+  //
+  // v6.2.2 — SPA HTML false-positive filter. Static HTML files served by a SPA shell
+  // (Angular/React/Vue bootstrap) return identical bodies to authenticated and
+  // unauthenticated requests because the client-side router handles auth AFTER the
+  // shell loads. These are NOT vulnerabilities. Filter out paths matching:
+  //   - ends with `.html`
+  //   - sameBody=true (identical to baseline = it's a static page, not a data API)
+  // Real APIs (`/api/*`, `/v1/*`) keep their reportable status. Path normalization
+  // strips hash fragments BEFORE the check.
   const authRemoval=(tab.probeData?.authRemovalResults||[]).filter(r=>r.severity==="critical"||r.severity==="high");
   authRemoval.forEach(r=>{
-    const sensitive=/\/(admin|user|account|billing|payment|invoice|settings|config|dashboard|manage|internal|private|profile|me\b|users|customers|employees|members|staff)/i.test(r.path||"");
+    const cleanedPath=cleanPath(r.path||"");
+    // SPA shell filter: static .html files with sameBody=true are almost certainly the
+    // SPA's bootstrap HTML, not a sensitive data endpoint.
+    if(/\.html?$/i.test(cleanedPath)&&r.sameBody===true)return;
+    const sensitive=/\/(admin|user|account|billing|payment|invoice|settings|config|dashboard|manage|internal|private|profile|me\b|users|customers|employees|members|staff)/i.test(cleanedPath);
     if(!sensitive)return;
     chains.push({
       id:`chain-authbypass-${chains.length}`,
       severity:"critical",
-      title:`Authentication bypass on sensitive endpoint: ${r.path}`,
-      summary:`PenScope's probe confirmed that ${r.method} ${r.path} returns the same data whether or not authentication cookies are sent (auth=${r.authStatus}, noauth=${r.noAuthStatus}, sameBody=${r.sameBody}). The path name strongly suggests this endpoint should be role-gated — it's returning sensitive data to unauthenticated callers.`,
-      findings:[{type:"auth-removal",path:r.path,data:r}],
-      reproCmd:`curl -i "${baseUrl}${r.path}"   # no auth, expect 200`,
-      nextSteps:["Confirm with a different network/IP","Enumerate adjacent endpoints (/users → /users/1, /users/2)","Check if any PII is returned","Report to the program with the diff-body evidence"],
+      title:`Authentication bypass on sensitive endpoint: ${cleanedPath}`,
+      summary:`PenScope's probe confirmed that ${r.method} ${cleanedPath} returns the same data whether or not authentication cookies are sent (auth=${r.authStatus}, noauth=${r.noAuthStatus}, sameBody=${r.sameBody}). The path name strongly suggests this endpoint should be role-gated — it's returning sensitive data to unauthenticated callers.`,
+      findings:[{type:"auth-removal",path:cleanedPath,data:r}],
+      reproCmd:`# Verify unauthenticated access\ncurl -i "${baseUrl}${cleanedPath}"\n\n# Compare to authenticated baseline (paste your real cookies):\ncurl -i "${baseUrl}${cleanedPath}" ${cookieFlag||'-H "Cookie: <YOUR-SESSION-COOKIES>"'}`,
+      nextSteps:["Confirm with a different network/IP","Diff the response bodies — are they actually identical, or does the no-auth version return less data?","Enumerate adjacent endpoints (/users → /users/1, /users/2)","Check if any PII is returned","Report to the program with the diff-body evidence"],
       confidence:0.95
     });
   });
@@ -5768,6 +5799,13 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse)=>{
     // v6.1 — Workbench: open URL handler. Returns the workbench URL the popup uses.
     case "wbOpen":{
       const url=chrome.runtime.getURL("workbench.html")+"?source="+msg.tabId;
+      chrome.tabs.create({url}).then(t=>sendResponse({ok:true,tabId:t.id})).catch(e=>sendResponse({ok:false,error:e.message||String(e)}));
+      return true;}
+    // v6.2 — Hunt Mode: open the autonomous hunter in a new Chrome tab. Same pattern
+    // as wbOpen — the source tab ID flows via URL params so the hunt orchestrator
+    // knows which tab to operate on.
+    case "huntOpen":{
+      const url=chrome.runtime.getURL("hunt.html")+"?source="+msg.tabId;
       chrome.tabs.create({url}).then(t=>sendResponse({ok:true,tabId:t.id})).catch(e=>sendResponse({ok:false,error:e.message||String(e)}));
       return true;}
     case "clearData":{const wasDeep=_debugTabs.has(msg.tabId);delete state[msg.tabId];if(_scripts[msg.tabId])_scripts[msg.tabId]=new Map();Object.keys(_seen).forEach(k=>{if(k.startsWith(`${msg.tabId}:`))delete _seen[k];});Object.keys(_pending).forEach(k=>{if(k.startsWith(`${msg.tabId}:`))delete _pending[k];});if(wasDeep)T(msg.tabId).deepEnabled=true;sendResponse({ok:true});return true;}

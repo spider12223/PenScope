@@ -11,14 +11,14 @@
 
 ### A bug bounty toolkit that lives inside your browser.
 
-![version](https://img.shields.io/badge/version-6.1.1-ff3a5c?style=for-the-badge)
+![version](https://img.shields.io/badge/version-6.2.2-ff3a5c?style=for-the-badge)
 ![manifest](https://img.shields.io/badge/manifest-v3-9b5aff?style=for-the-badge)
 ![deps](https://img.shields.io/badge/dependencies-0-3aff8a?style=for-the-badge)
 ![lines](https://img.shields.io/badge/LOC-14%2C000%2B-3aa8ff?style=for-the-badge)
 ![price](https://img.shields.io/badge/price-free-3addc4?style=for-the-badge)
 ![license](https://img.shields.io/badge/license-MIT-55556e?style=for-the-badge)
 
-**[Quick start](#quick-start) · [What you can do](#what-you-can-do) · [Workbench](#the-workbench) · [Modes](#modes) · [vs Burp](#vs-burp) · [Under the hood](#under-the-hood)**
+**[Quick start](#quick-start) · [Hunt Mode](#hunt-mode) · [Workbench](#the-workbench) · [Modes](#modes) · [vs Burp](#vs-burp) · [Under the hood](#under-the-hood)**
 
 </div>
 
@@ -72,6 +72,28 @@ PenScope captures 60+ data fields per tab. Here's what that means in practice:
 **Track your scope over time.** Snapshot a site today, snapshot it again next sprint, click Compare. PenScope tells you which findings are new, which are resolved, which haven't moved. Export the diff as Markdown for the team Slack.
 
 **Map findings to compliance controls.** Click Compliance Audit. Every finding maps to specific controls in PCI-DSS v4, NESA UAE IAS, SAMA CSF, DESC ISR, ISO 27001, OWASP Top 10 2021, and CWE. Export JSON for your SIEM. Export PDF for the auditor.
+
+---
+
+## Hunt Mode
+
+Click `🎯 Hunt` in the popup header. A new tab opens. Configure your target scope (in-scope paths, out-of-scope paths, aggression level, time budget). Click `▶ Start Hunt`.
+
+PenScope autonomously:
+
+1. Settles passive recon
+2. Runs the full 36-step probe pipeline + 8 stack-aware attack packs
+3. Sweeps the **Authorization Matrix** across saved auth contexts
+4. Runs the chain correlator, filters by your scope rules
+5. **Drafts a complete HackerOne-format report for every Critical and High chain** — title, severity with CVSS estimate, summary, steps to reproduce with curl, impact statement, suggested fix, references
+6. Fires a Chrome notification per critical: _"Hunt Mode found a Critical IDOR — report draft ready"_
+7. Persists drafts to `chrome.storage.local` keyed by host
+
+**You wake up to a queue of pre-written bounty reports.** Read each, click Copy or Export, paste into your HackerOne / Bugcrowd / Intigriti submission.
+
+This is the workflow Burp doesn't even attempt. Burp's Active Scanner runs attacks but you still have to write the report. PenScope owns the entire path from scan → exploit → report → submit.
+
+> Set scope. Hit Start. Close the laptop. Wake up to a queue of drafted Criticals.
 
 ---
 
@@ -190,6 +212,7 @@ PenScope and Burp solve the same problem from different sides. PenScope lives in
 | **CSP generator from observed traffic** | ✅ | ❌ |
 | **Regression diff** (snapshot + compare) | ✅ | ❌ |
 | **AI integration** (Claude bidirectional) | ✅ | ❌ |
+| **Autonomous Hunt Mode** (drafts H1 reports while you sleep) | ✅ | ❌ |
 | **Setup time** | 60 seconds | ~30 minutes (proxy + cert + browser config) |
 | **TLS-level proxy interception** | ❌ (browser limitation) | ✅ |
 | **Out-of-band testing** (Collaborator) | ❌ (planned) | ✅ |
@@ -361,6 +384,9 @@ PenScope/
 │
 ├── workbench.html             Workbench full-tab UI shell (~960 lines)
 ├── workbench.js               Workbench logic — Repeater/Intruder/Encoder/Diff/SiteMap/AuthCtx (~1,200 lines)
+│
+├── hunt.html                  Hunt Mode full-tab UI shell (~440 lines)
+├── hunt.js                    Hunt Mode orchestrator + report composer (~720 lines)
 │
 ├── red-attacks.js             Reference: STACK_ATTACK_PACKS (8 stacks)
 ├── blue-fixes.js              Reference: FIX_SNIPPETS (30+ remediation snippets)

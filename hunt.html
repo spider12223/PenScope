@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PenScope Hunt Mode</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+  :root {
+    --bg0: #06060a;
+    --bg1: rgba(14,14,22,.85);
+    --bg2: rgba(20,20,32,.7);
+    --glass: rgba(16,16,28,.55);
+    --glass2: rgba(24,24,40,.45);
+    --glass3: rgba(32,32,52,.35);
+    --glassbrd: rgba(255,255,255,.06);
+    --glassbrd2: rgba(255,255,255,.1);
+    --bgh: rgba(255,255,255,.03);
+    --t1: #eaeaf6;
+    --t2: #9898b8;
+    --t3: #55556e;
+    --red: #ff3a5c;
+    --orange: #ff7b3a;
+    --yellow: #ffc53a;
+    --green: #3aff8a;
+    --blue: #3aa8ff;
+    --purple: #9b5aff;
+    --teal: #3addc4;
+    --coral: #ff6b5a;
+    --pink: #ff5aaa;
+    --crit: #ff3a5c; --high: #ff7b3a; --med: #dda820; --low: #3aa8ff;
+    --crit-bg: rgba(255,58,92,.1); --high-bg: rgba(255,123,58,.1); --med-bg: rgba(255,197,58,.1); --low-bg: rgba(58,168,255,.1);
+    --glow-purple: 0 0 30px rgba(155,90,255,.18);
+    --glow-orange: 0 0 24px rgba(255,123,58,.20);
+    --font: 'Plus Jakarta Sans', -apple-system, sans-serif;
+    --mono: 'JetBrains Mono', 'SF Mono', monospace;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; }
+  body {
+    background: var(--bg0);
+    background-image:
+      radial-gradient(ellipse at 12% 0%, rgba(255,123,58,.08) 0%, transparent 55%),
+      radial-gradient(ellipse at 88% 100%, rgba(255,58,92,.07) 0%, transparent 55%),
+      radial-gradient(ellipse at 50% 50%, rgba(155,90,255,.04) 0%, transparent 60%);
+    color: var(--t1);
+    font-family: var(--font);
+    font-size: 12px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Header */
+  .hdr { display:flex; align-items:center; gap:14px; padding:12px 20px; background:var(--glass); backdrop-filter:blur(20px); border-bottom:1px solid var(--glassbrd); flex-shrink:0; }
+  .logo { width:32px; height:32px; background:linear-gradient(135deg,var(--orange),var(--coral)); border-radius:9px; display:flex; align-items:center; justify-content:center; font-size:18px; font-weight:800; color:#fff; box-shadow:var(--glow-orange); }
+  .title { font-weight:700; font-size:17px; letter-spacing:-.4px; }
+  .title em { font-style:normal; background:linear-gradient(135deg,var(--orange),var(--coral)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+  .title .ver { font-size:9px; color:var(--t3); font-weight:400; margin-left:6px; -webkit-text-fill-color:var(--t3); }
+  .target-pill { display:flex; align-items:center; gap:8px; background:var(--glass2); border:1px solid var(--glassbrd2); padding:6px 12px; border-radius:20px; font-family:var(--mono); font-size:10px; color:var(--t2); max-width:520px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .target-dot { width:7px; height:7px; background:var(--orange); border-radius:50%; box-shadow:0 0 10px rgba(255,123,58,.7); animation:pulse 1.6s infinite; flex-shrink:0; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  .hdr-actions { margin-left:auto; display:flex; gap:8px; align-items:center; }
+  .status-pill { display:flex; align-items:center; gap:8px; background:var(--glass2); border:1px solid var(--glassbrd2); padding:5px 12px; border-radius:16px; font-size:10px; color:var(--t2); font-weight:600; }
+  .status-pill.live { background:rgba(255,123,58,.12); border-color:rgba(255,123,58,.35); color:var(--orange); }
+  .status-pill.done { background:rgba(58,255,138,.12); border-color:rgba(58,255,138,.35); color:var(--green); }
+  .status-pill.error { background:rgba(255,58,92,.12); border-color:rgba(255,58,92,.35); color:var(--red); }
+  .status-dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+
+  /* Subtab nav */
+  .nav { display:flex; gap:2px; padding:6px 18px; background:var(--bg1); border-bottom:1px solid var(--glassbrd); flex-shrink:0; }
+  .nav-btn { padding:9px 16px; border:none; background:transparent; color:var(--t2); font-family:var(--font); font-size:11px; font-weight:600; cursor:pointer; border-radius:6px; transition:all .15s ease; display:flex; align-items:center; gap:6px; }
+  .nav-btn:hover { color:var(--t1); background:var(--glass2); }
+  .nav-btn.active { color:#fff; background:linear-gradient(135deg,var(--orange),var(--coral)); box-shadow:0 0 16px rgba(255,123,58,.25); }
+  .nav-btn:focus-visible { outline:2px solid var(--orange); outline-offset:2px; }
+  .nav-icon { font-family:var(--mono); font-size:13px; opacity:.85; }
+  .nav-badge { display:inline-block; background:var(--glass3); padding:1px 6px; border-radius:10px; font-family:var(--mono); font-size:9px; font-weight:700; margin-left:4px; min-width:16px; text-align:center; }
+  .nav-btn.active .nav-badge { background:rgba(255,255,255,.2); }
+
+  /* Main */
+  .main { flex:1; overflow:auto; }
+  .subtab { display:none; padding:24px 28px; max-width:1100px; margin:0 auto; }
+  .subtab.active { display:block; }
+  h2 { font-size:16px; font-weight:700; color:var(--t1); margin-bottom:6px; letter-spacing:-.3px; }
+  .h2-sub { font-size:11px; color:var(--t3); margin-bottom:20px; line-height:1.6; }
+
+  /* Setup */
+  .field { margin-bottom:18px; }
+  .field-label { display:block; font-size:10px; color:var(--t3); text-transform:uppercase; letter-spacing:.5px; font-weight:700; margin-bottom:6px; }
+  .field-input, .field-textarea { width:100%; background:var(--glass); border:1px solid var(--glassbrd2); color:var(--t1); font-family:var(--mono); font-size:11px; padding:9px 12px; border-radius:7px; outline:none; transition:border-color .15s ease; }
+  .field-input:focus, .field-textarea:focus { border-color:rgba(255,123,58,.5); box-shadow:0 0 16px rgba(255,123,58,.1); }
+  .field-textarea { resize:vertical; line-height:1.6; min-height:80px; }
+  .field-hint { font-size:10px; color:var(--t3); margin-top:5px; line-height:1.5; }
+  .field-hint code { font-family:var(--mono); background:var(--glass2); padding:1px 5px; border-radius:3px; color:var(--t2); }
+
+  .opt-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:14px; }
+  @media (max-width:760px) { .opt-grid { grid-template-columns:1fr; } }
+
+  .pill-row { display:flex; gap:6px; flex-wrap:wrap; }
+  .pill-btn { padding:7px 14px; border:1px solid var(--glassbrd2); background:var(--glass2); color:var(--t2); font-size:11px; font-weight:700; cursor:pointer; border-radius:8px; font-family:var(--font); transition:all .15s ease; }
+  .pill-btn:hover { color:var(--t1); border-color:rgba(255,123,58,.4); }
+  .pill-btn.active { background:linear-gradient(135deg,var(--orange),var(--coral)); color:#fff; border-color:transparent; box-shadow:0 0 14px rgba(255,123,58,.3); }
+  .pill-btn:focus-visible { outline:2px solid var(--orange); outline-offset:2px; }
+
+  .checkbox-row { display:flex; align-items:center; gap:8px; padding:10px 12px; background:var(--glass); border:1px solid var(--glassbrd); border-radius:8px; cursor:pointer; }
+  .checkbox-row:hover { background:var(--glass2); }
+  .checkbox-row input[type="checkbox"] { accent-color:var(--orange); width:14px; height:14px; }
+  .checkbox-row .ck-label { font-size:11px; color:var(--t1); flex:1; }
+  .checkbox-row .ck-hint { font-size:10px; color:var(--t3); }
+
+  /* Big start button */
+  .start-area { margin-top:28px; padding-top:24px; border-top:1px solid var(--glassbrd); display:flex; gap:12px; align-items:center; }
+  .btn-hunt { background:linear-gradient(135deg,var(--orange),var(--coral)); border:none; color:#fff; font-weight:800; font-size:14px; padding:12px 28px; border-radius:10px; cursor:pointer; box-shadow:var(--glow-orange); font-family:var(--font); display:flex; align-items:center; gap:10px; transition:all .2s ease; }
+  .btn-hunt:hover { transform:translateY(-1px); box-shadow:0 0 32px rgba(255,123,58,.35); }
+  .btn-hunt:disabled { opacity:.5; cursor:not-allowed; transform:none; }
+  .btn-hunt-ic { font-size:18px; }
+  .btn-secondary { background:var(--glass2); border:1px solid var(--glassbrd2); color:var(--t2); font-weight:600; font-size:12px; padding:10px 18px; border-radius:8px; cursor:pointer; font-family:var(--font); }
+  .btn-secondary:hover { color:var(--t1); border-color:rgba(255,123,58,.3); }
+
+  /* Live tab */
+  .progress-card { background:var(--glass); border:1px solid var(--glassbrd); border-radius:12px; padding:20px; margin-bottom:18px; }
+  .progress-bar-wrap { background:var(--bg2); border-radius:10px; height:8px; overflow:hidden; margin:12px 0; }
+  .progress-bar { height:100%; background:linear-gradient(90deg,var(--orange),var(--coral)); transition:width .4s ease; box-shadow:0 0 12px rgba(255,123,58,.3); }
+  .progress-text { display:flex; justify-content:space-between; font-family:var(--mono); font-size:10px; color:var(--t3); }
+  .progress-text strong { color:var(--orange); }
+
+  .stats-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin:18px 0; }
+  .stat-card { background:var(--glass); border:1px solid var(--glassbrd); border-radius:10px; padding:14px 10px; text-align:center; }
+  .stat-card .stat-n { font-family:var(--mono); font-size:24px; font-weight:800; line-height:1; }
+  .stat-card .stat-l { font-size:9px; color:var(--t3); text-transform:uppercase; letter-spacing:.6px; font-weight:700; margin-top:6px; }
+
+  .step-list { background:var(--glass); border:1px solid var(--glassbrd); border-radius:12px; padding:16px; }
+  .step { display:flex; align-items:center; gap:12px; padding:9px 0; border-bottom:1px solid var(--glassbrd); }
+  .step:last-child { border-bottom:none; }
+  .step-icon { width:22px; height:22px; border-radius:50%; background:var(--glass2); display:flex; align-items:center; justify-content:center; font-family:var(--mono); font-size:10px; color:var(--t3); font-weight:700; flex-shrink:0; }
+  .step.done .step-icon { background:linear-gradient(135deg,var(--green),var(--teal)); color:#000; }
+  .step.live .step-icon { background:linear-gradient(135deg,var(--orange),var(--coral)); color:#fff; animation:pulseRing 1.5s infinite; }
+  @keyframes pulseRing { 0%,100% { box-shadow:0 0 0 0 rgba(255,123,58,.5); } 50% { box-shadow:0 0 0 6px rgba(255,123,58,0); } }
+  .step-text { flex:1; font-size:11px; color:var(--t2); }
+  .step.live .step-text { color:var(--t1); font-weight:600; }
+  .step.done .step-text { color:var(--t2); }
+  .step-meta { font-family:var(--mono); font-size:9px; color:var(--t3); }
+
+  .live-feed { background:var(--glass); border:1px solid var(--glassbrd); border-radius:12px; padding:14px; margin-top:18px; max-height:280px; overflow-y:auto; }
+  .feed-line { padding:5px 0; font-family:var(--mono); font-size:10px; color:var(--t2); display:flex; gap:10px; align-items:flex-start; border-bottom:1px solid var(--glassbrd); }
+  .feed-line:last-child { border-bottom:none; }
+  .feed-time { color:var(--t3); flex-shrink:0; }
+  .feed-icon { flex-shrink:0; width:14px; text-align:center; }
+  .feed-text { flex:1; word-break:break-word; }
+  .feed-line.crit .feed-text { color:var(--crit); font-weight:600; }
+  .feed-line.high .feed-text { color:var(--high); font-weight:600; }
+  .feed-line.med .feed-text { color:var(--med); }
+  .feed-line.info .feed-text { color:var(--t2); }
+
+  /* Reports tab */
+  .reports-empty { text-align:center; padding:60px 20px; color:var(--t3); }
+  .reports-empty-i { font-size:36px; margin-bottom:14px; opacity:.4; }
+  .reports-empty-t { font-size:12px; }
+
+  .report-list { display:grid; gap:10px; }
+  .report-card { background:var(--glass); border:1px solid var(--glassbrd); border-radius:10px; padding:14px 16px; cursor:pointer; transition:all .15s ease; border-left:3px solid transparent; }
+  .report-card:hover { background:var(--glass2); border-color:var(--glassbrd2); }
+  .report-card.crit { border-left-color:var(--crit); }
+  .report-card.high { border-left-color:var(--high); }
+  .report-card.med { border-left-color:var(--med); }
+  .report-card.low { border-left-color:var(--low); }
+  .report-head { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+  .report-sev { font-size:9px; font-weight:800; padding:2px 8px; border-radius:4px; text-transform:uppercase; letter-spacing:.4px; }
+  .report-sev.crit { background:var(--crit-bg); color:var(--crit); }
+  .report-sev.high { background:var(--high-bg); color:var(--high); }
+  .report-sev.med { background:var(--med-bg); color:var(--med); }
+  .report-sev.low { background:var(--low-bg); color:var(--low); }
+  .report-title { font-size:12px; font-weight:700; flex:1; }
+  .report-time { font-family:var(--mono); font-size:9px; color:var(--t3); }
+  .report-summary { font-size:10px; color:var(--t2); line-height:1.5; }
+
+  /* Report viewer modal */
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.65); backdrop-filter:blur(4px); display:none; align-items:center; justify-content:center; z-index:100; }
+  .modal-bg.show { display:flex; }
+  .modal { background:var(--bg1); border:1px solid var(--glassbrd2); border-radius:14px; width:92%; max-width:880px; max-height:90vh; overflow:hidden; display:flex; flex-direction:column; box-shadow:0 24px 80px rgba(0,0,0,.7); }
+  .modal-hdr { padding:14px 20px; border-bottom:1px solid var(--glassbrd); display:flex; align-items:center; gap:10px; }
+  .modal-hdr h3 { font-size:13px; font-weight:700; flex:1; }
+  .modal-body { flex:1; overflow:auto; padding:0; background:var(--bg0); }
+  .modal-body pre { font-family:var(--mono); font-size:11px; line-height:1.65; color:var(--t1); padding:24px; white-space:pre-wrap; word-break:break-word; }
+  .modal-actions { padding:12px 20px; border-top:1px solid var(--glassbrd); display:flex; gap:8px; align-items:center; background:var(--glass); }
+  .modal-close { padding:6px 10px; background:var(--glass2); border:1px solid var(--glassbrd2); color:var(--t2); border-radius:6px; cursor:pointer; font-size:11px; font-family:var(--font); }
+  .modal-close:hover { color:var(--t1); }
+
+  /* Toast */
+  .toast { position:fixed; bottom:30px; left:50%; transform:translateX(-50%); background:linear-gradient(135deg,var(--orange),var(--coral)); color:#fff; padding:10px 24px; border-radius:10px; font-size:12px; font-weight:700; box-shadow:var(--glow-orange); display:none; z-index:1000; }
+  .toast.show { display:block; animation:slideIn .25s ease; }
+  @keyframes slideIn { from { transform:translateX(-50%) translateY(10px); opacity:0; } to { transform:translateX(-50%) translateY(0); opacity:1; } }
+
+  /* Common buttons */
+  .btn { background:var(--glass2); border:1px solid var(--glassbrd2); color:var(--t2); padding:6px 12px; border-radius:7px; font-size:11px; font-weight:600; cursor:pointer; font-family:var(--font); }
+  .btn:hover { color:var(--t1); border-color:rgba(255,123,58,.3); }
+  .btn:focus-visible { outline:2px solid var(--orange); outline-offset:1px; }
+  .btn.primary { background:linear-gradient(135deg,var(--orange),var(--coral)); color:#fff; border-color:transparent; box-shadow:0 0 12px rgba(255,123,58,.25); }
+  .btn.danger:hover { color:var(--red); border-color:rgba(255,58,92,.3); }
+
+  ::-webkit-scrollbar { width:6px; height:6px; }
+  ::-webkit-scrollbar-thumb { background:rgba(255,123,58,.25); border-radius:3px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+
+  .badge { display:inline-block; font-family:var(--mono); font-size:8px; font-weight:700; padding:2px 6px; border-radius:3px; background:var(--glass2); color:var(--t3); text-transform:uppercase; letter-spacing:.5px; }
+</style>
+</head>
+<body>
+  <div class="hdr">
+    <div class="logo">🎯</div>
+    <div class="title">Pen<em>Scope</em> Hunt Mode <span class="ver">v6.2</span></div>
+    <div class="target-pill"><div class="target-dot"></div><span id="targetUrl">—</span></div>
+    <div class="hdr-actions">
+      <div class="status-pill" id="statusPill"><div class="status-dot"></div><span id="statusText">Idle</span></div>
+    </div>
+  </div>
+
+  <nav class="nav" role="tablist">
+    <button class="nav-btn active" data-subtab="setup" role="tab" aria-selected="true"><span class="nav-icon">⚙</span>Setup</button>
+    <button class="nav-btn" data-subtab="live" role="tab" aria-selected="false"><span class="nav-icon">●</span>Live</button>
+    <button class="nav-btn" data-subtab="reports" role="tab" aria-selected="false"><span class="nav-icon">📋</span>Reports <span class="nav-badge" id="reportCountBadge">0</span></button>
+  </nav>
+
+  <div class="main">
+    <!-- SETUP ============================================================== -->
+    <div class="subtab active" id="sub-setup">
+      <h2>Configure the hunt</h2>
+      <div class="h2-sub">PenScope will autonomously crawl the target, run all 36 probe attacks + stack-aware packs, sweep the Authorization Matrix across saved auth contexts, and draft full HackerOne-format bounty reports for every Critical and High chain it finds. You'll get a Chrome notification per critical. Reports persist on this tab — you can read, edit, and submit them later.</div>
+
+      <div class="field">
+        <label class="field-label">Target</label>
+        <input type="text" class="field-input" id="cfgTarget" placeholder="https://target.tld" spellcheck="false">
+        <div class="field-hint">Defaults to the active tab's URL. Hunt Mode operates on this origin.</div>
+      </div>
+
+      <div class="opt-grid">
+        <div class="field">
+          <label class="field-label">In-scope paths (one per line)</label>
+          <textarea class="field-textarea" id="cfgInScope" placeholder="/api/*&#10;/admin/*&#10;/v2/*" spellcheck="false"></textarea>
+          <div class="field-hint">Glob patterns. Empty = all paths. Use <code>*</code> as wildcard.</div>
+        </div>
+        <div class="field">
+          <label class="field-label">Out-of-scope paths (skip)</label>
+          <textarea class="field-textarea" id="cfgOutScope" placeholder="/static/*&#10;/assets/*&#10;/health" spellcheck="false"></textarea>
+          <div class="field-hint">Skip these regardless of in-scope. Bug bounty programs often exclude /static, /assets.</div>
+        </div>
+      </div>
+
+      <div class="opt-grid">
+        <div class="field">
+          <label class="field-label">Aggression level</label>
+          <div class="pill-row" id="cfgAggro" role="radiogroup">
+            <button class="pill-btn" data-aggro="careful" role="radio">🟢 Careful</button>
+            <button class="pill-btn active" data-aggro="medium" role="radio" aria-checked="true">🟡 Medium</button>
+            <button class="pill-btn" data-aggro="full" role="radio">🔴 Full Send</button>
+          </div>
+          <div class="field-hint">Careful = GET only, read-only paths. Medium = tests auth, no modifications. Full = everything (only on programs that explicitly allow destructive testing).</div>
+        </div>
+        <div class="field">
+          <label class="field-label">Time budget</label>
+          <div class="pill-row" id="cfgBudget" role="radiogroup">
+            <button class="pill-btn" data-budget="5" role="radio">5 min</button>
+            <button class="pill-btn active" data-budget="15" role="radio" aria-checked="true">15 min</button>
+            <button class="pill-btn" data-budget="30" role="radio">30 min</button>
+            <button class="pill-btn" data-budget="60" role="radio">1 hour</button>
+          </div>
+          <div class="field-hint">Hunt aborts when this elapses. Reports drafted up to that point persist.</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="field-label">Modules</label>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <label class="checkbox-row">
+            <input type="checkbox" id="cfgProbes" checked>
+            <span class="ck-label">Run 36-step probe pipeline</span>
+            <span class="ck-hint">~3-8 min · auth bypass, IDOR, CORS, JWT, SSTI, XXE, CRLF, prototype pollution</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="cfgStackPacks" checked>
+            <span class="ck-label">Run stack-aware attack packs</span>
+            <span class="ck-hint">Auto-detect Laravel/Spring/Rails/Django/etc. and fire framework-specific tests</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="cfgAuthMatrix">
+            <span class="ck-label">Run Authorization Matrix sweep</span>
+            <span class="ck-hint">Requires 2+ saved auth contexts in the Workbench. Tests every endpoint as every saved user.</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="cfgChainOnly" checked>
+            <span class="ck-label">Only Critical + High severity</span>
+            <span class="ck-hint">Filter to high-priority items only — both compound chains and individual high-severity findings (exposed secrets, JWT alg=none, etc.). Uncheck for everything.</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="cfgNotify" checked>
+            <span class="ck-label">Chrome notifications on Critical / High findings</span>
+            <span class="ck-hint">Fire OS-level notification when a high-severity chain is detected</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="start-area">
+        <button class="btn-hunt" id="huntStartBtn"><span class="btn-hunt-ic">▶</span><span>Start Hunt</span></button>
+        <button class="btn-secondary" id="huntStopBtn" style="display:none">Stop Hunt</button>
+        <span style="flex:1"></span>
+        <span style="font-size:10px;color:var(--t3)">⚠ Only run on targets you have explicit permission to test (active bounty program, customer engagement, your own infrastructure).</span>
+      </div>
+    </div>
+
+    <!-- LIVE =============================================================== -->
+    <div class="subtab" id="sub-live">
+      <h2>Live hunt</h2>
+      <div class="h2-sub">Real-time progress. PenScope updates as each step completes. Leave this tab open until the hunt finishes or click <strong>Stop Hunt</strong> in Setup to abort.</div>
+
+      <div class="progress-card">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <span style="font-size:11px;font-weight:700;color:var(--t1)">Overall progress</span>
+          <span id="progressPct" style="font-family:var(--mono);font-size:11px;color:var(--orange);font-weight:700">0%</span>
+        </div>
+        <div class="progress-bar-wrap"><div class="progress-bar" id="progressBar" style="width:0%"></div></div>
+        <div class="progress-text">
+          <span>Step <strong id="progressStep">—</strong> of <strong id="progressTotal">—</strong></span>
+          <span>Elapsed: <strong id="progressElapsed">0s</strong> · ETA: <strong id="progressEta">—</strong></span>
+        </div>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-n" style="color:var(--blue)" id="statEndpoints">0</div><div class="stat-l">Endpoints</div></div>
+        <div class="stat-card"><div class="stat-n" style="color:var(--purple)" id="statRequests">0</div><div class="stat-l">Requests</div></div>
+        <div class="stat-card"><div class="stat-n" style="color:var(--orange)" id="statFindings">0</div><div class="stat-l">Findings</div></div>
+        <div class="stat-card"><div class="stat-n" style="color:var(--red)" id="statChains">0</div><div class="stat-l">Chains</div></div>
+        <div class="stat-card"><div class="stat-n" style="color:var(--green)" id="statReports">0</div><div class="stat-l">Drafts</div></div>
+      </div>
+
+      <div class="step-list" id="stepList"></div>
+
+      <div class="live-feed" id="liveFeed">
+        <div style="padding:24px;text-align:center;color:var(--t3);font-size:11px">Hunt hasn't started yet. Configure the hunt in <strong>Setup</strong> and click Start Hunt.</div>
+      </div>
+    </div>
+
+    <!-- REPORTS ============================================================ -->
+    <div class="subtab" id="sub-reports">
+      <h2>Drafted reports</h2>
+      <div class="h2-sub">Hunt Mode generates a full HackerOne-format report for every Critical and High chain. Each report includes title, severity with CVSS estimate, summary, steps to reproduce, impact, suggested fix, and a working curl. Click any card to view, edit, copy, or export.</div>
+
+      <div style="display:flex;gap:8px;margin-bottom:14px;align-items:center">
+        <button class="btn" id="reportsRefresh">↻ Refresh</button>
+        <button class="btn" id="reportsExportAll">Export all as Markdown</button>
+        <button class="btn danger" id="reportsClearAll">Clear all drafts</button>
+        <span style="flex:1"></span>
+        <span style="font-family:var(--mono);font-size:10px;color:var(--t3)" id="reportsHostMeta"></span>
+      </div>
+
+      <div id="reportsList">
+        <div class="reports-empty">
+          <div class="reports-empty-i">📋</div>
+          <div class="reports-empty-t">No reports yet — start a hunt</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Report viewer modal -->
+  <div class="modal-bg" id="reportModal">
+    <div class="modal">
+      <div class="modal-hdr">
+        <h3 id="modalTitle">Report</h3>
+        <button class="modal-close" id="modalCloseBtn">✕</button>
+      </div>
+      <div class="modal-body">
+        <pre id="modalBody"></pre>
+      </div>
+      <div class="modal-actions">
+        <button class="btn primary" id="modalCopyBtn">Copy markdown</button>
+        <button class="btn" id="modalExportBtn">Export .md file</button>
+        <button class="btn danger" id="modalDeleteBtn">Delete draft</button>
+        <span style="flex:1"></span>
+        <span style="font-family:var(--mono);font-size:10px;color:var(--t3)" id="modalMeta"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="hunt.js"></script>
+</body>
+</html>
