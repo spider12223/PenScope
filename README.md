@@ -14,7 +14,7 @@
 ![version](https://img.shields.io/badge/version-6.2.2-ff3a5c?style=for-the-badge)
 ![manifest](https://img.shields.io/badge/manifest-v3-9b5aff?style=for-the-badge)
 ![deps](https://img.shields.io/badge/dependencies-0-3aff8a?style=for-the-badge)
-![lines](https://img.shields.io/badge/LOC-14%2C000%2B-3aa8ff?style=for-the-badge)
+![lines](https://img.shields.io/badge/LOC-16%2C000%2B-3aa8ff?style=for-the-badge)
 ![price](https://img.shields.io/badge/price-free-3addc4?style=for-the-badge)
 ![license](https://img.shields.io/badge/license-MIT-55556e?style=for-the-badge)
 
@@ -26,11 +26,14 @@
 
 ## What this is
 
-PenScope is a Chrome extension. Install it, browse a site you have permission to test, and it silently maps the entire attack surface — every endpoint, every secret, every misconfigured header, every hidden parameter. Then, when you give the word, it sends 36 different probe attacks using your real session cookies and reports back which ones hit.
+PenScope is a Chrome extension. Install it, browse a site you have permission to test, and it silently maps the entire attack surface — every endpoint, every secret, every misconfigured header, every hidden parameter. When you give the word, it sends 36 different probe attacks using your real session cookies and reports back which ones hit.
 
-It's the daily driver for bug bounty hunters who want to skip the "set up a proxy, click around in three windows, alt-tab to a payload list" routine and just **look at a site**. It captures everything passively. It tells you what's exploitable. It hands you a working `curl` per finding.
+Or you set scope, click **Hunt**, and PenScope does the whole thing autonomously while you do something else — drafting full HackerOne-format bounty reports for every Critical and High finding it lands. You wake up to a queue of submittable drafts.
+
+It's the daily driver for bug bounty hunters who want to skip the "set up a proxy, click around in three windows, alt-tab to a payload list" routine and just **look at a site**. Or stop looking entirely and let the tool hunt for them.
 
 > **Reads everything, sends nothing — until you tell it to.**
+> **Set scope, hit Hunt, close the laptop. Wake up to drafted criticals.**
 
 ---
 
@@ -82,18 +85,71 @@ Click `🎯 Hunt` in the popup header. A new tab opens. Configure your target sc
 PenScope autonomously:
 
 1. Settles passive recon
-2. Runs the full 36-step probe pipeline + 8 stack-aware attack packs
-3. Sweeps the **Authorization Matrix** across saved auth contexts
-4. Runs the chain correlator, filters by your scope rules
-5. **Drafts a complete HackerOne-format report for every Critical and High chain** — title, severity with CVSS estimate, summary, steps to reproduce with curl, impact statement, suggested fix, references
-6. Fires a Chrome notification per critical: _"Hunt Mode found a Critical IDOR — report draft ready"_
-7. Persists drafts to `chrome.storage.local` keyed by host
+2. **Auto-enables Deep mode** (CDP debugger attaches silently — no user prompt)
+3. Runs the full 36-step probe pipeline + 8 stack-aware attack packs
+4. Sweeps the **Authorization Matrix** across saved auth contexts
+5. Runs the chain correlator, filters by your scope rules
+6. **Drafts a complete HackerOne-format report for every Critical and High finding** — chains *and* individual high-severity findings (exposed secrets, JWT alg=none, confirmed SSTI/XXE/CRLF). Each draft includes title, severity with CVSS estimate, summary, steps to reproduce with two-step curl (no-auth probe + auth baseline for diff), impact statement specific to the finding, suggested fix from the snippet library, and references
+7. Fires a Chrome notification per critical: _"Hunt Mode found a Critical IDOR on /api/users — report draft ready"_
+8. Persists drafts to `chrome.storage.local` keyed by host (survive tab close + browser restart)
 
 **You wake up to a queue of pre-written bounty reports.** Read each, click Copy or Export, paste into your HackerOne / Bugcrowd / Intigriti submission.
 
 This is the workflow Burp doesn't even attempt. Burp's Active Scanner runs attacks but you still have to write the report. PenScope owns the entire path from scan → exploit → report → submit.
 
 > Set scope. Hit Start. Close the laptop. Wake up to a queue of drafted Criticals.
+
+### Quality controls (v6.2.2 — keep your reputation)
+
+Hunt Mode actively filters false positives that would burn your reputation if submitted:
+
+- **SPA HTML shells** — Angular/React/Vue bootstrap pages return identical HTML to authenticated and unauthenticated requests because the JS handles auth client-side. Hunt Mode detects this pattern (path ends in `.html` + `sameBody=true`) and suppresses the finding. Real APIs still report.
+- **Benign Azure SAS tokens** — short-lived read-only SAS URLs for media (`image.jpg?sv=...&sp=r&se=...`) are legitimate CDN delivery, not credential leaks. Hunt Mode checks `sp=r` + media file extension + `se - st < 7 days` and suppresses. Long-lived, write-capable, or non-media SAS tokens still report as real leaks.
+- **Hash fragment normalization** — `/Dashboard#!/` is a client-side route, not a server endpoint. Hunt Mode strips hash fragments before chain analysis so the report shows `/Dashboard` (the actual server path).
+- **Real `baseUrl` in every curl** — the chain analyzer derives the target host from `tab.url` (HTTP/HTTPS only) with a fallback to the first observed endpoint. No more `https://target.tld` placeholder URLs in your reports.
+
+### A real Hunt Mode draft
+
+Here's a redacted excerpt from an actual draft Hunt Mode produced on a government LMS in 4 minutes:
+
+```markdown
+# Authentication bypass on sensitive endpoint: /api/DashboardApi/getUsefulLinks
+
+**Severity:** CRITICAL (CVSS estimate: 9.0–10.0)
+**Confidence:** 95%
+**Target:** https://lms.example.gov/Dashboard
+**Discovered:** 2026-05-01T07:31:13.151Z
+**Detected by:** PenScope v6.2 Hunt Mode (chain pattern: chain-authbypass)
+
+## Summary
+PenScope's probe confirmed that GET /api/DashboardApi/getUsefulLinks returns
+the same data whether or not authentication cookies are sent
+(auth=200, noauth=200, sameBody=false). The path name strongly suggests this
+endpoint should be role-gated — it's returning sensitive data to
+unauthenticated callers.
+
+## Steps to reproduce
+# Verify unauthenticated access
+curl -i "https://lms.example.gov/api/DashboardApi/getUsefulLinks"
+
+# Compare to authenticated baseline (paste your real cookies):
+curl -i "https://lms.example.gov/api/DashboardApi/getUsefulLinks" -b "session=..."
+
+## Impact
+Successful exploitation enables an attacker to bypass core security controls,
+gain unauthorized access to sensitive functionality or data, and pivot to
+broader compromise. This is a credible breach path warranting immediate
+remediation.
+
+## Suggested fix
+Enforce server-side authentication on every endpoint that returns sensitive
+data. The fact that PenScope received a 200 with no cookies means the
+authorization middleware is missing or disabled for this route.
+
+[ ... full Express/Django/Laravel snippet examples + references ... ]
+```
+
+**That's a submittable bounty report.** Drafted while you were doing something else.
 
 ---
 
@@ -263,21 +319,35 @@ Architecture, the 36 probe attacks, the 13 chain patterns, the file map, and why
                     │   CDP / probe layers      │
                     └──────────┬───────────────┘
                                │
-       ┌───────────────────────┼────────────────────────┐
-       │                       │                         │
-  Classic mode              Red mode                Blue mode
-  renderClassic()          renderRed()             renderBlue()
-       │                       │                         │
-       └───────────────────────┴─────────────────────────┘
+       ┌───────────────────────┼───────────────────────┐
+       │                       │                       │
+  Classic mode             Red mode               Blue mode
+  renderClassic()         renderRed()            renderBlue()
+       │                       │                       │
+       └───────────────────────┴───────────────────────┘
                                │
-                          Workbench
-                  (separate full-tab UI sharing
-                   state via message handlers)
+              ┌────────────────┴────────────────┐
+              │                                 │
+         Workbench                          Hunt Mode
+   (Repeater · Intruder · Encoder       (autonomous orchestrator
+    · Diff · Site Map · Auth Matrix)     drafting H1 reports)
 ```
 
-**One engine, three modes, two surfaces.** The data engine is mode-agnostic — every state field collects the same way regardless of which view you're in. Modes are theme + renderer choices over the same data. The Workbench is a standalone Chrome tab that talks to the same `state[tabId]`.
+**One engine, three modes, three surfaces.** The data engine is mode-agnostic — every state field collects the same way regardless of which view you're in. Modes are theme + renderer choices over the same data. The Workbench and Hunt Mode are standalone Chrome tabs that share `state[tabId]` via background message handlers.
 
 CSS variable overrides (`body.mode-red`, `body.mode-blue`) re-theme everything without touching a single rule selector. That's why Classic mode is byte-for-byte the v5.9 experience.
+
+---
+
+## Performance
+
+PenScope is on every tab, all the time. By default it short-circuits expensive enrichment for ~50 known noisy host suffixes (video CDNs like `googlevideo.com`, ad networks like `doubleclick.net`, telemetry endpoints like `sentry.io`, large static CDNs like `gstatic.com`). Hundreds of `googlevideo.com` chunk requests per minute on YouTube no longer run through 14 AUTH_PATTERN regexes + path-param detection + Swagger lookup — they're logged as endpoints (so the Site Map still includes them) and skipped for the rest.
+
+Same fast path for `image`/`media`/`font`/`stylesheet`/`object`/`ping` resource types on any host. Bugs almost never hide in `.css` URL params.
+
+Content-script DOM rescans run via `requestIdleCallback` (with a hard 15-second floor between scans) and skip entirely when the tab is hidden. MutationObserver filters text-only changes (timer ticks, character-data updates) so YouTube's constant DOM churn doesn't trigger a full rescan every 3 seconds.
+
+Override available: **"Full capture on noisy hosts"** checkbox in the Probe dropdown. When you're specifically auditing YouTube/Twitch/Sentry/etc. AS the target, check it and the fast path is bypassed.
 
 ---
 
@@ -376,17 +446,17 @@ Floor at 10 so a catastrophic site reads "10/100", not "0/100" (which the user c
 
 ```
 PenScope/
-├── manifest.json              MV3 manifest
-├── background.js              Service worker — webRequest, CDP, probe engine, chain analyzer (~6,200 lines)
-├── popup.html                 Mode UI shell — three modes, glassmorphism dark theme (~340 lines)
-├── popup.js                   Renderers, mode router, weaponize panels, fix snippets, compliance (~3,300 lines)
-├── content.js                 Content script — DOM scanning, secrets, hidden fields, forms, XSS sinks (~700 lines)
+├── manifest.json              MV3 manifest, v6.2.2
+├── background.js              Service worker — webRequest, CDP, probe engine, chain analyzer, page-context runners, noisy-host shortcut (~6,300 lines)
+├── popup.html                 Mode UI shell — three modes, glassmorphism dark theme (~350 lines)
+├── popup.js                   Renderers, mode router, weaponize panels, fix snippets, compliance, Hunt + Workbench launchers (~3,400 lines)
+├── content.js                 Content script — DOM scanning, secrets, hidden fields, forms, XSS sinks, benign-SAS filter, idle-deferred rescans (~720 lines)
 │
 ├── workbench.html             Workbench full-tab UI shell (~960 lines)
 ├── workbench.js               Workbench logic — Repeater/Intruder/Encoder/Diff/SiteMap/AuthCtx (~1,200 lines)
 │
 ├── hunt.html                  Hunt Mode full-tab UI shell (~440 lines)
-├── hunt.js                    Hunt Mode orchestrator + report composer (~720 lines)
+├── hunt.js                    Hunt Mode orchestrator + report composer + finding fallback (~830 lines)
 │
 ├── red-attacks.js             Reference: STACK_ATTACK_PACKS (8 stacks)
 ├── blue-fixes.js              Reference: FIX_SNIPPETS (30+ remediation snippets)
@@ -394,7 +464,7 @@ PenScope/
 ├── blue-compliance.js         Reference: COMPLIANCE_MAP (7 frameworks)
 │
 ├── icons/                     16, 48, 128 px PNG
-├── CHANGELOG.md               Full version history v5.1 → v6.1
+├── CHANGELOG.md               Full version history v5.1 → v6.2.2
 ├── LICENSE                    MIT
 └── README.md                  You are here
 ```
