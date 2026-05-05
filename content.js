@@ -29,6 +29,61 @@ const PS_CONFIG = {
   ELEMENT_SAMPLE_SIZE: 50,
 };
 
+let _PACK_SECRETS=null;
+function _ensureRegexPack(cb){
+  if(_PACK_SECRETS){cb(_PACK_SECRETS);return;}
+  try{chrome.runtime.sendMessage({action:"getRegexPack"},r=>{
+    void chrome.runtime.lastError;
+    if(r&&r.ok&&r.raw&&Array.isArray(r.raw.secrets)){
+      _PACK_SECRETS=r.raw.secrets.map(p=>{
+        try{return Object.assign({},p,{regex:new RegExp(p.pattern,p.flags||"g"),sev:p.severity});}
+        catch(e){return null;}
+      }).filter(Boolean);
+    }else{_PACK_SECRETS=[];}
+    cb(_PACK_SECRETS);
+  });}catch(e){_PACK_SECRETS=[];cb(_PACK_SECRETS);}
+}
+
+function _decodeJwtClaims(token){
+  if(!token||typeof token!=="string")return null;
+  try{
+    const parts=token.split(".");
+    if(parts.length<2)return null;
+    function b64u(s){return atob(s.replace(/-/g,"+").replace(/_/g,"/"));}
+    const header=JSON.parse(b64u(parts[0]));
+    const payload=JSON.parse(b64u(parts[1]));
+    const claims={};
+    ["alg","typ","kid"].forEach(k=>{if(header[k]!==undefined)claims[k]=header[k];});
+    ["iss","sub","aud","exp","iat","nbf","jti","role","roles","scope","scopes","permissions","email","tenant","org","org_id"].forEach(k=>{if(payload[k]!==undefined)claims[k]=payload[k];});
+    const now=Math.floor(Date.now()/1000);
+    const live=typeof payload.exp==="number"?payload.exp>now:null;
+    let adminShaped=false;
+    const roleVal=payload.role||payload.roles||payload.scope||payload.scopes||payload.permissions;
+    if(roleVal){
+      const rs=Array.isArray(roleVal)?roleVal.join(" "):String(roleVal);
+      if(/admin|root|superuser|owner|sudo|impersonate|all|\*/i.test(rs))adminShaped=true;
+    }
+    return{header:header,payload:payload,claims:claims,live:live,adminShaped:adminShaped};
+  }catch(e){return null;}
+}
+function _enrichJwt(secrets){
+  if(!Array.isArray(secrets))return secrets;
+  secrets.forEach(s=>{
+    if(!s||typeof s.value!=="string")return;
+    const looksJwt=/^eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\./.test(s.value);
+    if(!looksJwt)return;
+    const dec=_decodeJwtClaims(s.value);
+    if(!dec)return;
+    s.jwt=dec;
+    if(dec.live&&dec.adminShaped){
+      const ord={info:0,low:1,medium:2,high:3,critical:4};
+      const cur=ord[s.severity]||0;
+      if(cur<4)s.severity=["info","low","medium","high","critical"][Math.min(4,cur+1)];
+    }
+  });
+  return secrets;
+}
+
 function semverCompare(a, b) {
   const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
@@ -65,12 +120,12 @@ const SECRETS = [
   {name:"SendGrid Key",regex:/SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}/g,sev:"critical"},
   {name:"Mailgun Key",regex:/key-[0-9a-zA-Z]{32}/g,sev:"high"},
   {name:"Mailchimp Key",regex:/[a-f0-9]{32}-us\d{1,2}/g,sev:"high"},
-  {name:"Twilio SID",regex:/AC[a-f0-9]{32}/g,sev:"high"},
+  {name:"Twilio SID",regex:/\bAC[a-f0-9]{32}\b/g,sev:"high"},
   {name:"Telegram Bot",regex:/\d{8,10}:AA[A-Za-z0-9_-]{33,}/g,sev:"critical"},
   {name:"Discord Webhook",regex:/https:\/\/(?:discord|discordapp)\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+/g,sev:"high"},
   {name:"Discord Token",regex:/[MN][A-Za-z0-9]{23,}\.[\w-]{6}\.[\w-]{27,}/g,sev:"critical"},
   {name:"Sentry DSN",regex:/https:\/\/[a-f0-9]{32}@[a-z0-9.]+\.ingest\.sentry\.io\/[0-9]+/g,sev:"medium"},
-  {name:"Datadog API",regex:/dd[a-f0-9]{32,}/g,sev:"high"},
+  {name:"Datadog API",regex:/(?:dd_api_key|dd_app_key|datadog\.api_key)\s*[=:]\s*['"]?([a-f0-9]{32})['"]?/gi,sev:"high"},
   {name:"New Relic Key",regex:/NRAK-[A-Z0-9]{27}/g,sev:"high"},
   {name:"MapBox Token",regex:/pk\.[A-Za-z0-9]{60,}/g,sev:"medium"},
   {name:"Shopify Token",regex:/shpat_[a-fA-F0-9]{32}/g,sev:"critical"},
@@ -169,6 +224,22 @@ const TECH_FP = [
   {name:"Rails",check:()=>!!document.querySelector('meta[name="csrf-param"][content="authenticity_token"]')},
   {name:"ASP.NET",check:()=>!!document.querySelector('input[name="__VIEWSTATE"],input[name="__EVENTVALIDATION"]')},
   {name:"Blazor",check:()=>!!document.querySelector('script[src*="_framework/blazor"]')},
+  {name:"Qwik",check:()=>!!document.querySelector('script[type="qwik/json"],[q\\:container]')||/qwik/i.test(Array.from(document.querySelectorAll("script[src]")).map(s=>s.src).join(" "))},
+  {name:"SolidStart",check:()=>!!document.querySelector('script[src*="solid-start"]')||(!!document.querySelector("[data-hk^='0-']")&&!window.__SVELTE__)},
+  {name:"Tauri",check:()=>{try{return typeof window.__TAURI__!=="undefined"||typeof window.__TAURI_INTERNALS__!=="undefined";}catch(e){return false;}}},
+  {name:"Strapi",check:()=>{try{return Array.from(document.querySelectorAll("script[src]")).some(s=>/strapi/i.test(s.src));}catch(e){return false;}}},
+  {name:"Sanity",check:()=>!!document.querySelector('script[src*="@sanity/"],[data-sanity]')||/sanity/i.test(Array.from(document.querySelectorAll("script[src]")).map(s=>s.src).join(" "))},
+  {name:"Contentful",check:()=>{try{return Array.from(document.querySelectorAll("script[src],img[src]")).some(s=>/cdn\.contentful\.com|images\.ctfassets\.net/.test(s.src));}catch(e){return false;}}},
+  {name:"Hygraph (GraphCMS)",check:()=>{try{return Array.from(document.querySelectorAll("script[src],img[src]")).some(s=>/graphcms\.com|hygraph\.com/.test(s.src));}catch(e){return false;}}},
+  {name:"Clerk",check:()=>{try{return typeof window.__clerk_db_jwt!=="undefined"||!!document.querySelector('script[src*="clerk."],script[src*="clerk.com"]');}catch(e){return false;}}},
+  {name:"Cognito",check:()=>{try{return Array.from(document.querySelectorAll("script[src]")).some(s=>/cognito-idp\.|amazoncognito\.com/.test(s.src));}catch(e){return false;}}},
+  {name:"Okta",check:()=>{try{return!!document.querySelector('[data-okta]')||Array.from(document.querySelectorAll("script[src]")).some(s=>/-okta\.com|okta\.com\/js/.test(s.src));}catch(e){return false;}}},
+  {name:"PingIdentity",check:()=>{try{return Array.from(document.querySelectorAll("script[src]")).some(s=>/pingidentity|pingone/.test(s.src));}catch(e){return false;}}},
+  {name:"Workday",check:()=>/myworkdayjobs\.com|workday\.com/.test(location.hostname)||!!document.querySelector('script[src*="workday"]')},
+  {name:"ServiceNow",check:()=>/service-now\.com/.test(location.hostname)||document.cookie.indexOf("glide_user_session")>-1||!!document.querySelector('script[src*="service-now"]')},
+  {name:"Salesforce Lightning",check:()=>/lightning\.force\.com|salesforce\.com/.test(location.hostname)||!!document.querySelector("lightning-base-component, [class^='slds-']")},
+  {name:"Adobe AEM",check:()=>{try{return!!document.querySelector('link[href*="/etc/clientlibs/"],script[src*="/etc/clientlibs/"],meta[name="generator"][content*="Adobe Experience Manager"]');}catch(e){return false;}}},
+  {name:"Electron Renderer",check:()=>{try{return typeof window.process!=="undefined"&&!!window.process&&!!window.process.versions&&!!window.process.versions.electron;}catch(e){return false;}}},
 ];
 
 const GLOBAL_KEYS=["__NEXT_DATA__","__NUXT__","__INITIAL_STATE__","__PRELOADED_STATE__","__APP_CONFIG__","__CONFIG__","__ENV__","ENV","APP_CONFIG","config","appConfig","settings","featureFlags","__APOLLO_STATE__","__RELAY_STORE__","graphqlEndpoint","API_URL","API_BASE","API_ENDPOINT","BASE_URL","SENTRY_DSN","STRIPE_KEY","FIREBASE_CONFIG","SUPABASE_KEY","__RUNTIME_CONFIG__","__remixContext","process","dataLayer","intercomSettings","DD_RUM","NREUM","amplitude","mixpanel","posthog"];
@@ -214,8 +285,18 @@ function scanSecrets(){
   document.querySelectorAll("meta").forEach(m=>{const c=m.getAttribute("content")||"",n=m.getAttribute("name")||m.getAttribute("property")||"";if(c.length>8)texts.push({source:`meta[${n}]`,content:c});});
   document.querySelectorAll("noscript").forEach(ns=>{if(ns.textContent.trim().length>10)texts.push({source:"noscript",content:ns.textContent});});
   document.querySelectorAll("template").forEach(tpl=>{if(tpl.innerHTML.trim().length>10)texts.push({source:"template",content:tpl.innerHTML});});
+  document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"]').forEach(sj=>{
+    const t=(sj.textContent||"").trim();
+    if(t.length>10&&t.length<500000)texts.push({source:"json-island"+(sj.id?`#${sj.id}`:""),content:t});
+  });
+  const seenPatterns=new Set();
+  const allPatterns=[];
+  SECRETS.forEach(p=>{if(!seenPatterns.has(p.name)){seenPatterns.add(p.name);allPatterns.push(p);}});
+  if(_PACK_SECRETS&&_PACK_SECRETS.length){
+    _PACK_SECRETS.forEach(p=>{if(!seenPatterns.has(p.name)){seenPatterns.add(p.name);allPatterns.push(p);}});
+  }
   texts.forEach(({source,content})=>{
-    SECRETS.forEach(pat=>{
+    allPatterns.forEach(pat=>{
       pat.regex.lastIndex=0;
       let match,count=0;
       while((match=pat.regex.exec(content))!==null&&count<PS_CONFIG.SECRET_MATCH_LIMIT){
@@ -225,13 +306,46 @@ function scanSecrets(){
         seen.add(key);
         const s=Math.max(0,match.index-40),e=Math.min(content.length,match.index+match[0].length+40);
         const ctx=content.substring(s,e).replace(/[\n\r]/g," ").substring(0,200);
-        // v6.2.2 — Filter benign Azure SAS (short-lived read-only media URLs)
         if(pat.name==="Azure SAS"&&isBenignAzureSas(val,ctx))continue;
         results.push({type:pat.name,value:val.substring(0,150),severity:pat.sev,source,context:ctx});
       }
     });
   });
-  return results;
+  return _enrichJwt(results);
+}
+
+function scanJsonIslands(){
+  const out=[];
+  const NAMED={"__NEXT_DATA__":"next","__NUXT__":"nuxt","__remixContext":"remix","__APOLLO_STATE__":"apollo","__INITIAL_STATE__":"initial-state","__PRELOADED_STATE__":"preloaded-state"};
+  document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"]').forEach(sj=>{
+    const id=sj.id||"";
+    const text=(sj.textContent||"").trim();
+    if(text.length<2||text.length>500000)return;
+    let parsed;try{parsed=JSON.parse(text);}catch(e){return;}
+    const tag=NAMED[id]||(id||"json-island").replace(/[^A-Za-z0-9_-]/g,"_");
+    const endpoints=new Set();const ids=[];
+    function walk(o,depth){
+      if(o==null||depth>8)return;
+      if(typeof o==="string"){
+        if(/^\/(?:api|v\d+|graphql|gql|admin|internal|app)\//i.test(o)&&o.length<200)endpoints.add(o);
+        else if(/^https?:\/\//.test(o)&&/\/(?:api|v\d+|graphql|gql)\//i.test(o)&&o.length<400)endpoints.add(o);
+        return;
+      }
+      if(typeof o!=="object")return;
+      if(Array.isArray(o)){for(let i=0;i<o.length&&i<200;i++)walk(o[i],depth+1);return;}
+      const keys=Object.keys(o);
+      for(let i=0;i<keys.length&&i<300;i++){
+        const k=keys[i];const v=o[k];
+        if(/^id$|_id$|Id$/.test(k)&&(typeof v==="string"||typeof v==="number")){
+          const sv=String(v);if(sv.length>0&&sv.length<200)ids.push({key:k,value:sv,type:/^[a-f0-9-]{32,}$/.test(sv)?"uuid":/^\d+$/.test(sv)?"numeric":"string"});
+        }
+        walk(v,depth+1);
+      }
+    }
+    walk(parsed,0);
+    out.push({tag:tag,id:id,size:text.length,endpoints:[...endpoints].slice(0,200),ids:ids.slice(0,200)});
+  });
+  return out;
 }
 
 function scanDOMElements(){const allElements=document.querySelectorAll("*");const hiddenFields=[];const inlineHandlers=[];const events=["onclick","onmouseover","onerror","onload","onfocus","onblur","onsubmit","onchange","oninput","onkeyup","onkeydown","onkeypress","ondblclick","oncontextmenu","onmouseenter","onmouseleave","ondrag","ondrop","onpaste","oncopy","onmessage"];const skip=["data-reactid","data-react-","data-v-","data-ng-","data-bs-","data-toggle","data-target","data-dismiss","data-slide","data-ride","data-svelte-h","data-astro-cid","data-lit-","data-testid","data-cy","data-qa","data-emotion","data-styled","data-radix","data-reactroot","data-placement","data-original-title"];allElements.forEach(el=>{Array.from(el.attributes).filter(a=>a.name.startsWith("data-")&&a.value&&a.value.length>15).forEach(a=>{if(!skip.some(s=>a.name.startsWith(s))){hiddenFields.push({name:a.name,value:a.value.substring(0,300),element:el.tagName.toLowerCase(),source:"data-attr"});}});events.forEach(attr=>{const val=el.getAttribute(attr);if(val)inlineHandlers.push({event:attr,element:el.tagName.toLowerCase(),code:val.substring(0,200),id:el.id||""});});});return{hiddenFields,inlineHandlers};}
@@ -499,18 +613,15 @@ function scanCookieValues(){
     cookies.forEach(c=>{
       const parts=c.trim().split("=");
       const name=parts[0];
-      const value=parts.slice(1).join("=");
+      let value=parts.slice(1).join("=");
       if(!value||value.length<10)return;
-      // Check for JWT
-      if(/^eyJ[A-Za-z0-9_-]+\.eyJ/.test(value))findings.push({cookie:name,type:"JWT in cookie",value:value.substring(0,100),risk:"high"});
-      // Check for base64 encoded data
-      else if(/^[A-Za-z0-9+/]{30,}={0,2}$/.test(value)){
-        try{const decoded=atob(value);if(/[{"\w]/.test(decoded))findings.push({cookie:name,type:"Base64 data",value:decoded.substring(0,100),risk:"medium"});}catch{}
+      const probe=value.length>4096?value.substring(0,4096):value;
+      if(/^eyJ[A-Za-z0-9_-]+\.eyJ/.test(probe))findings.push({cookie:name,type:"JWT in cookie",value:probe.substring(0,100),risk:"high"});
+      else if(/^[A-Za-z0-9+/]{30,}={0,2}$/.test(probe)){
+        try{const decoded=atob(probe);if(/[{"\w]/.test(decoded))findings.push({cookie:name,type:"Base64 data",value:decoded.substring(0,100),risk:"medium"});}catch{}
       }
-      // Check for sequential/numeric IDs
-      else if(/^\d{3,10}$/.test(value))findings.push({cookie:name,type:"Sequential ID",value,risk:"medium"});
-      // Check for plaintext username/email patterns
-      else if(/^[a-zA-Z0-9._-]+@/.test(value))findings.push({cookie:name,type:"Email in cookie",value:value.substring(0,60),risk:"low"});
+      else if(/^\d{3,10}$/.test(probe))findings.push({cookie:name,type:"Sequential ID",value:probe,risk:"medium"});
+      else if(/^[a-zA-Z0-9._-]+@/.test(probe))findings.push({cookie:name,type:"Email in cookie",value:probe.substring(0,60),risk:"low"});
     });
   }catch{}
   return findings;
@@ -680,7 +791,23 @@ function scanCoopCoep() {
   return info.features.length ? info : null;
 }
 
-function setupCSPViolationListener(){document.addEventListener("securitypolicyviolation",e=>{try{chrome.runtime.sendMessage({action:"reportContentScan",cspViolations:[{directive:e.violatedDirective,blockedUri:e.blockedURI,sourceFile:e.sourceFile,lineNumber:e.lineNumber}]});}catch{}});}
+let _cspBucket=[];let _cspBucketStart=0;let _cspSuppressed=0;let _cspFlushTimer=null;
+function _flushCspBucket(){
+  if(!_cspBucket.length){_cspFlushTimer=null;return;}
+  const batch=_cspBucket.splice(0,_cspBucket.length);
+  const suppressed=_cspSuppressed;_cspSuppressed=0;
+  try{chrome.runtime.sendMessage({action:"reportContentScan",cspViolations:batch,cspViolationsSuppressed:suppressed});}catch{}
+  _cspFlushTimer=null;
+}
+function setupCSPViolationListener(){
+  document.addEventListener("securitypolicyviolation",e=>{
+    const now=Date.now();
+    if(now-_cspBucketStart>1000){_cspBucket=[];_cspBucketStart=now;}
+    if(_cspBucket.length>=10){_cspSuppressed++;return;}
+    _cspBucket.push({directive:String(e.violatedDirective||"").substring(0,200),blockedUri:String(e.blockedURI||"").substring(0,500),sourceFile:String(e.sourceFile||"").substring(0,500),lineNumber:e.lineNumber|0});
+    if(!_cspFlushTimer)_cspFlushTimer=setTimeout(_flushCspBucket,200);
+  });
+}
 
 // ============================================================
 // MASTER SCAN
@@ -718,10 +845,11 @@ function runFullScan(){
 
   let perfEntries=[];
   try{perfEntries=performance.getEntriesByType("resource").slice(0,PS_CONFIG.PERF_ENTRY_LIMIT).map(r=>({name:r.name,type:r.initiatorType,duration:Math.round(r.duration),size:r.transferSize||0}));}catch{}
+  let jsonIslands; try { jsonIslands = scanJsonIslands(); } catch(e) { console.warn('[PenScope] scanJsonIslands failed:', e); jsonIslands = []; }
 
   const data={secrets,hiddenFields,forms,techStack,jsGlobals,storageData,links,sourceMaps,inlineHandlers,metaTags,serviceWorkers,perfEntries,
     mixedContent,sriIssues,postMessageListeners,dependencyVersions,webWorkers,domXSSSinks,jsonpEndpoints,cookieFindings,reconSuggestions,
-    webAuthnInfo,webrtcLeaks,wasmModules,coopCoepInfo
+    webAuthnInfo,webrtcLeaks,wasmModules,coopCoepInfo,jsonIslands
   };
   chrome.runtime.sendMessage({action:"reportContentScan",...data});
   return data;
@@ -729,11 +857,13 @@ function runFullScan(){
 
 chrome.runtime.onMessage.addListener((msg,sender,sendResponse)=>{
   if(msg.action==="scan"){
-    try{runFullScan();}catch(e){console.warn('[PenScope]',e);}
+    _ensureRegexPack(()=>{try{runFullScan();}catch(e){console.warn('[PenScope]',e);}});
     sendResponse({ok:true});
   }
   return true;
 });
+
+_ensureRegexPack(()=>{});
 setupCSPViolationListener();
 
 let _lastScanHash="";

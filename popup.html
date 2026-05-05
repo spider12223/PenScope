@@ -3,7 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+  @font-face{font-family:'Plus Jakarta Sans';font-style:normal;font-weight:400;font-display:swap;src:url('fonts/plus-jakarta-sans-regular.woff2') format('woff2');}
+  @font-face{font-family:'Plus Jakarta Sans';font-style:normal;font-weight:500;font-display:swap;src:url('fonts/plus-jakarta-sans-medium.woff2') format('woff2');}
+  @font-face{font-family:'Plus Jakarta Sans';font-style:normal;font-weight:600;font-display:swap;src:url('fonts/plus-jakarta-sans-semibold.woff2') format('woff2');}
+  @font-face{font-family:'Plus Jakarta Sans';font-style:normal;font-weight:700;font-display:swap;src:url('fonts/plus-jakarta-sans-bold.woff2') format('woff2');}
+  @font-face{font-family:'Plus Jakarta Sans';font-style:normal;font-weight:800;font-display:swap;src:url('fonts/plus-jakarta-sans-extrabold.woff2') format('woff2');}
+  @font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:url('fonts/jetbrains-mono-regular.woff2') format('woff2');}
+  @font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:500;font-display:swap;src:url('fonts/jetbrains-mono-medium.woff2') format('woff2');}
+  @font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:600;font-display:swap;src:url('fonts/jetbrains-mono-semibold.woff2') format('woff2');}
+  @font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:700;font-display:swap;src:url('fonts/jetbrains-mono-bold.woff2') format('woff2');}
 
   :root {
     --bg0: #06060a;
@@ -253,9 +261,9 @@
         <button class="btn btn-probe" id="btnProbe" title="Probe — sends requests (bug bounty mode)" style="border-radius:8px 0 0 8px">Probe</button>
         <button class="deep-drop-btn" id="btnProbeDrop" style="border-color:rgba(255,123,58,.3)">▾</button>
         <div class="deep-menu" id="probeMenu" style="min-width:300px">
-          <div class="deep-item" data-aggro="careful" style="color:var(--green)">🟢 Careful — GET only, read-only</div>
-          <div class="deep-item" data-aggro="medium" style="color:var(--yellow)">🟡 Medium — test auth, no modifications</div>
-          <div class="deep-item" data-aggro="full" style="color:var(--red)">🔴 Full Send — test everything</div>
+          <div class="deep-item" data-aggro="careful" style="color:var(--green)" title="GET / HEAD / OPTIONS only. No POST/PUT/PATCH/DELETE. Sequential probing with 200ms minimum spacing. No GraphQL introspection (POST). No race-condition bursts.">🟢 Careful — GET only, sequential, 200ms spacing</div>
+          <div class="deep-item" data-aggro="medium" style="color:var(--yellow)" title="Adds POST for read-shaped operations: GraphQL introspection / fuzzing, OPTIONS, IDOR/auth/CSRF tests via POST. No PUT/PATCH/DELETE. Up to 3 parallel.">🟡 Medium — adds POST for introspection + auth tests, ≤3 parallel</div>
+          <div class="deep-item" data-aggro="full" style="color:var(--red)" title="All HTTP methods including PUT/PATCH/DELETE. Race-condition bursts (10 parallel). Proto pollution + JWT alg=none enabled.">🔴 Full Send — all methods, race bursts, ≤10 parallel</div>
           <div style="padding:8px 10px;border-top:1px solid var(--glassbrd);margin-top:4px">
             <div style="font-size:9px;color:var(--t3);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Custom Headers</div>
             <textarea id="probeHeaders" placeholder="Authorization: Bearer xxx&#10;X-API-Key: abc123&#10;X-Forwarded-For: 127.0.0.1" spellcheck="false" style="width:100%;min-height:60px;background:var(--glass2);border:1px solid var(--glassbrd);border-radius:6px;padding:6px 8px;color:var(--t1);font-family:var(--mono);font-size:10px;resize:vertical;outline:none;box-sizing:border-box"></textarea>
@@ -278,7 +286,9 @@
       <button class="btn v6-focusable" id="btnHunt" title="Hunt Mode — autonomous attacker that drafts bounty reports while you sleep" style="background:linear-gradient(135deg,rgba(255,123,58,.28),rgba(255,107,90,.20));border-color:rgba(255,123,58,.4);color:var(--orange);font-weight:700">🎯 Hunt</button>
       <button class="btn v6-focusable" id="btnWorkbench" title="Open the hunter workbench: Repeater · Intruder · Encoder · Diff · Site Map · Auth Contexts" style="background:linear-gradient(135deg,rgba(58,168,255,.25),rgba(58,221,196,.18));border-color:rgba(58,168,255,.35);color:var(--blue);font-weight:700">⌘ Workbench</button>
       <button class="btn" id="btnExport">Export ▾</button>
-      <div class="exp-menu" id="exportMenu"><div class="exp-item" data-fmt="json">JSON (full data)</div><div class="exp-item" data-fmt="report">📄 Full Report (.md)</div><div class="exp-item" data-fmt="burp">Burp URL list</div><div class="exp-item" data-fmt="wordlist">Param wordlist</div><div class="exp-item" data-fmt="endpoints">Endpoints (txt)</div><div class="exp-item" data-fmt="swagger">🔧 Swagger Spec (.yaml)</div><div class="exp-item" data-fmt="sourcemaps">🗺️ Source Maps (JSON)</div><div class="exp-item" data-fmt="nuclei">⚔️ Nuclei Templates (.yaml)</div><div class="exp-item" data-fmt="har-import" style="border-top:1px solid var(--glassbrd);margin-top:4px;padding-top:8px;color:var(--teal)">📥 Import HAR...</div></div>
+      <div class="exp-menu" id="exportMenu"><div class="exp-item" data-fmt="json">JSON (full data)</div><div class="exp-item" data-fmt="report">📄 Full Report (.md)</div><div class="exp-item" data-fmt="burp">Burp URL list</div><div class="exp-item" data-fmt="wordlist">Param wordlist</div><div class="exp-item" data-fmt="ffuf">Param wordlist (ffuf)</div><div class="exp-item" data-fmt="endpoints">Endpoints (txt)</div><div class="exp-item" data-fmt="har">📤 HAR Export</div><div class="exp-item" data-fmt="swagger">🔧 Swagger Spec (.yaml)</div><div class="exp-item" data-fmt="sourcemaps">🗺️ Source Maps (JSON)</div><div class="exp-item" data-fmt="nuclei">⚔️ Nuclei Templates (.yaml)</div><div class="exp-item" data-fmt="har-import" style="border-top:1px solid var(--glassbrd);margin-top:4px;padding-top:8px;color:var(--teal)">📥 Import HAR...</div></div>
+      <button class="btn" id="btnSnap" title="Save snapshot of current scan for later diff">📸 Snap</button>
+      <button class="btn" id="btnDiff" title="Compare current scan vs last snapshot">↔ Diff</button>
       <button class="btn" id="btnClear">Clear</button>
       <button class="btn btn-main" id="btnScan">⟳ Scan</button>
       <button class="btn btn-claude" id="btnClaude">→ Claude</button>

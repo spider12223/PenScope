@@ -1,0 +1,58 @@
+export const STACK_ATTACK_PACKS={
+  laravel:[
+    {step:"laravel-debug",method:"GET",path:"/?XDEBUG_SESSION_START=1",expect:["whoops","Stack trace"]},
+    {step:"laravel-ignition",method:"POST",path:"/_ignition/execute-solution",body:{solution:"Facade\\Ignition\\Solutions\\MakeViewVariableOptionalSolution",parameters:{viewFile:"phpinfo()",variableName:"a"}},severity:"critical"},
+    {step:"laravel-telescope",method:"GET",path:"/telescope",expect:["<title>Telescope"]},
+    {step:"laravel-horizon",method:"GET",path:"/horizon",expect:["Horizon"]},
+    {step:"laravel-env",method:"GET",path:"/.env",expect:["APP_KEY=","DB_PASSWORD"],severity:"critical"},
+    {step:"laravel-storage",method:"GET",path:"/storage/logs/laravel.log"},
+    {step:"laravel-debugbar",method:"GET",path:"/_debugbar/open",expect:["debugbar"]},
+  ],
+  spring:[
+    {step:"spring-actuator",method:"GET",path:"/actuator"},
+    {step:"spring-heapdump",method:"GET",path:"/actuator/heapdump",severity:"critical"},
+    {step:"spring-env",method:"GET",path:"/actuator/env"},
+    {step:"spring-mappings",method:"GET",path:"/actuator/mappings"},
+    {step:"spring-trace",method:"GET",path:"/actuator/trace"},
+    {step:"spring-jolokia",method:"GET",path:"/jolokia/list"},
+    {step:"spring-h2-console",method:"GET",path:"/h2-console"},
+    {step:"spring-loggers",method:"GET",path:"/actuator/loggers"},
+    {step:"spring-beans",method:"GET",path:"/actuator/beans"},
+  ],
+  rails:[
+    {step:"rails-secrets",method:"GET",path:"/config/secrets.yml",severity:"critical"},
+    {step:"rails-routes",method:"GET",path:"/rails/info/routes"},
+    {step:"rails-properties",method:"GET",path:"/rails/info/properties"},
+    {step:"rails-dj-console",method:"GET",path:"/admin/jobs"},
+    {step:"rails-database",method:"GET",path:"/config/database.yml",severity:"critical"},
+  ],
+  aspnet:[
+    {step:"aspnet-trace",method:"GET",path:"/trace.axd"},
+    {step:"aspnet-elmah",method:"GET",path:"/elmah.axd"},
+    {step:"aspnet-debug",method:"GET",path:"/?DEBUG=1"},
+    {step:"aspnet-bin",method:"GET",path:"/bin/"},
+    {step:"aspnet-webconfig",method:"GET",path:"/web.config"},
+  ],
+  django:[
+    {step:"django-debug",method:"GET",path:"/?debug=1",expect:["Django","DEBUG = True"]},
+    {step:"django-admin",method:"GET",path:"/admin/"},
+    {step:"django-static",method:"GET",path:"/static/admin/css/base.css"},
+    {step:"django-traceback",method:"GET",path:"/__debug__/",custom:"trigger-500-look-for-traceback"},
+  ],
+  nextjs:[
+    {step:"nextjs-build-manifest",method:"GET",path:"/_next/static/development/_buildManifest.js"},
+    {step:"nextjs-data",method:"GET",path:"/_next/data/"},
+    {step:"nextjs-image",method:"GET",path:"/_next/image?url=https%3A%2F%2Fevil.com%2Fimg.png&w=64&q=75",custom:"check-image-optimizer-ssrf"},
+  ],
+  graphql:[
+    {step:"graphql-introspect",method:"POST",path:"/graphql",body:{query:"{__schema{queryType{name} mutationType{name} types{name kind}}}"}},
+    {step:"graphql-batching",method:"POST",path:"/graphql",body:[{query:"{__typename}"},{query:"{__typename}"}],custom:"send-array-of-queries"},
+    {step:"graphql-field-fuzz",method:"POST",path:"/graphql",custom:"use-symbol-table-as-field-dict"},
+  ],
+  wordpress:[
+    {step:"wp-rest-users",method:"GET",path:"/wp-json/wp/v2/users"},
+    {step:"wp-xmlrpc",method:"POST",path:"/xmlrpc.php",body:'<?xml version="1.0"?><methodCall><methodName>system.listMethods</methodName></methodCall>'},
+    {step:"wp-readme",method:"GET",path:"/readme.html"},
+    {step:"wp-admin-ajax",method:"GET",path:"/wp-admin/admin-ajax.php?action="},
+  ],
+};

