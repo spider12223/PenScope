@@ -3318,7 +3318,7 @@ if(ctx.aggroLevel!=="careful"){
       try{
         var ssrfResp=await sf(ssrfUrl,null,5000);
         if(ssrfResp.status===0)continue;
-        var hits=/instance-id|metadata-flavor|computeMetadata|169\.254\.169\.254|ami-id|iam\/security-credentials|access-token/i.test(ssrfResp.body||"");
+        var hits=/instance-id|metadata-flavor|computeMetadata|169\\.254\\.169\\.254|ami-id|iam\\/security-credentials|access-token/i.test(ssrfResp.body||"");
         if(hits){
           R.ssrfResults.push({path:sEp.path,param:sp,payload:payload,status:ssrfResp.status,size:(ssrfResp.body||"").length,reflectedMetadata:true,severity:"critical",note:"Cloud metadata content reflected — confirmed SSRF"});
         }
@@ -3406,13 +3406,13 @@ if(ctx.aggroLevel==="full"&&R.graphql&&R.graphql.endpoint){
 R.errors.push("STEP 41: Cache Deception");
 R.cacheDeceptionResults=[];
 if(ctx.aggroLevel!=="careful"){
-  var cdTargets=ctx.observedApis.filter(function(e){return e.method==="GET"&&!/\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map)$/i.test(e.path);}).slice(0,8);
+  var cdTargets=ctx.observedApis.filter(function(e){return e.method==="GET"&&!/\\.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map)$/i.test(e.path);}).slice(0,8);
   var cdSuffixes=["/avatar.css","/avatar.js","/style.css","/script.js"];
   for(var cdi=0;cdi<cdTargets.length;cdi++){
     var cdEp=cdTargets[cdi];
     for(var cdsi=0;cdsi<cdSuffixes.length;cdsi++){
       try{
-        var deceitUrl=location.origin+cdEp.path.replace(/\/$/,"")+cdSuffixes[cdsi];
+        var deceitUrl=location.origin+cdEp.path.replace(/\\/$/,"")+cdSuffixes[cdsi];
         var deceitResp=await sf(deceitUrl,null,3000);
         if(deceitResp.status>=200&&deceitResp.status<300&&deceitResp.body&&deceitResp.body.length>30){
           var ct=(deceitResp.ct||"").toLowerCase();
@@ -3434,7 +3434,7 @@ R.subdomainTakeoverResults=[];
 if(R.subdomains&&R.subdomains.length){
   var TAKEOVER_SIGS=[
     {pattern:/There isn't a GitHub Pages site here/i,service:"GitHub Pages"},
-    {pattern:/<Code>NoSuchBucket<\/Code>/i,service:"AWS S3"},
+    {pattern:/<Code>NoSuchBucket<\\/Code>/i,service:"AWS S3"},
     {pattern:/no such app|no such heroku/i,service:"Heroku"},
     {pattern:/The specified bucket does not exist/i,service:"GCS"},
     {pattern:/<title>Site not found/i,service:"Netlify"},
@@ -3490,11 +3490,11 @@ R.errors.push("STEP 44: postMessage Origin-Check Correlation");
 R.postMessageRiskResults=[];
 try{
   var pmCount=0,unsafePm=0;
-  var safetyRe=/(?:\.origin|event\.origin|e\.origin|msg\.origin|ev\.origin)\s*[!=]==?\s*['"]/;
+  var safetyRe=/(?:\\.origin|event\\.origin|e\\.origin|msg\\.origin|ev\\.origin)\\s*[!=]==?\\s*['"]/;
   document.querySelectorAll("script:not([src])").forEach(function(s){
     var t=s.textContent||"";
     if(t.length<10)return;
-    var matchRe=/addEventListener\s*\(\s*['"]message['"]/g;
+    var matchRe=/addEventListener\\s*\\(\\s*['"]message['"]/g;
     var m;
     while((m=matchRe.exec(t))!==null){
       pmCount++;
