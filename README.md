@@ -11,10 +11,11 @@
 
 ### A bug bounty toolkit that lives inside your browser.
 
-![version](https://img.shields.io/badge/version-6.2.5-ff3a5c?style=for-the-badge)
-![manifest](https://img.shields.io/badge/manifest-v3-9b5aff?style=for-the-badge)
+![version](https://img.shields.io/badge/version-6.3.0-ff3a5c?style=for-the-badge)
+![manifest](https://img.shields.io/badge/manifest-v3%20%E2%80%A2%20ES%20module-9b5aff?style=for-the-badge)
 ![deps](https://img.shields.io/badge/dependencies-0-3aff8a?style=for-the-badge)
-![lines](https://img.shields.io/badge/LOC-16%2C000%2B-3aa8ff?style=for-the-badge)
+![lines](https://img.shields.io/badge/LOC-17%2C000%2B-3aa8ff?style=for-the-badge)
+![probes](https://img.shields.io/badge/probes-45-ff7b3a?style=for-the-badge)
 ![price](https://img.shields.io/badge/price-free-3addc4?style=for-the-badge)
 ![license](https://img.shields.io/badge/license-MIT-55556e?style=for-the-badge)
 
@@ -34,6 +35,28 @@ It's the daily driver for bug bounty hunters who want to skip the "set up a prox
 
 > **Reads everything, sends nothing — until you tell it to.**
 > **Set scope, hit Hunt, close the laptop. Wake up to drafted criticals.**
+
+---
+
+## What's new in v6.3
+
+Audit-driven refactor across 8 phases. Headline additions:
+
+- **Probe engine: 36 → 45 attacks.** SSRF param probing, NoSQL operator injection, GraphQL alias/batch DoS, cache deception, subdomain takeover heuristic, TabNabbing, postMessage origin correlation, Service Worker scope abuse.
+- **Tier contract is enforced, not described.** Careful = GET only, sequential, 200ms spacing. Medium = +POST for read-shape ops. Full = everything including race-condition bursts. Hover any tier in the Probe menu for the full contract.
+- **Coverage: 31 new secret patterns + 9 new response-body patterns.** Mapbox secret keys, Datadog (real format), Algolia admin, Twilio Auth Token, Postmark, Cloudflare API tokens, Heroku, Linear, Notion, Figma, Plaid pair, Snyk, Terraform Cloud, Pinata, SSH public keys, `.env` assignments, Vault `s.`/`b.` prefixes — plus Spring Boot / Rails ActiveRecord / Django DEBUG / ASP.NET YSOD / Express / Apollo / MSSQL response-body detectors.
+- **17 new tech fingerprints.** Qwik, SolidStart, Tauri, Strapi, Sanity, Contentful, Hygraph, Clerk, Cognito, Okta, PingIdentity, Workday, ServiceNow, Salesforce Lightning, Adobe AEM, Electron renderer.
+- **JWT enrichment.** Every detected JWT auto-decodes (`alg`, `iss`, `sub`, `aud`, `exp`, `iat`, `role`, `scope`...). Severity bumps when `exp` is in the future and the role is admin-shaped.
+- **CDP additions.** `Accessibility.getFullAXTree` surfaces sensitive aria-labels (admin/sudo/delete/destroy buttons). `Storage.getCookies` exposes CHIPS partitioned cookies that `chrome.cookies.getAll` doesn't.
+- **JSON island parser.** `<script type="application/json">` blocks (Next `__NEXT_DATA__`, Nuxt `__NUXT__`, Remix `__remixContext`, Apollo `__APOLLO_STATE__`) get parsed for endpoints + ID fields, not just regex-scanned.
+- **New endpoint-tab UX.** Per-row `curl` button, per-row `unauth` button (replays the request without cookies, shows side-by-side verdict). Route-table view that collapses `/users/123`, `/users/124` into `/users/{id}` with counts. Auto-pivot rail for `admin.*`, `api.*`, `internal.*` subdomains.
+- **HAR export + ffuf wordlist.** Mirror exports of the existing HAR import + Burp wordlist. Drop straight into `ffuf -w`.
+- **📸 Snap / ↔ Diff buttons in the popup header.** Save a snapshot now, compare any time later. Same machinery Blue mode uses.
+- **IndexedDB diff.** Capture client-side state, mutate the app, capture again, diff. Catches state-leak bugs that pure HTTP capture misses.
+- **Critical security fixes.** Probe `window.__ps_ctx` no longer leaks user's Authorization headers into page context after probe completes. Chain repro commands redact session cookies by default (Red mode has an opt-in toggle for live values). Probe IIFE snapshots `fetch`/`JSON`/`Promise`/`atob`/`btoa`/etc. at boot so analytics-instrumented pages can't intercept the probe by overriding globals. Local font vendoring — zero outbound requests on popup open.
+- **ES module migration.** SW now loads as `"type":"module"`. `src/` directory tree in place; `STACK_ATTACK_PACKS` extracted to `src/probe/stack-packs.js`. Remaining modules are stubs documenting the extraction path.
+
+Full per-phase breakdown in [`CHANGES.md`](./CHANGES.md). Migration notes in [`MIGRATION.md`](./MIGRATION.md).
 
 ---
 
@@ -255,7 +278,7 @@ Switch modes with the Classic / Red / Blue pill in the popup header. Each tab re
 
 ## Exports
 
-Click `Export ▾` in the popup header. Eight formats, two purposes:
+Click `Export ▾` in the popup header. Ten formats, two purposes:
 
 | Export | Includes credentials? | Use it for |
 |---|---|---|
@@ -263,7 +286,9 @@ Click `Export ▾` in the popup header. Eight formats, two purposes:
 | **📄 Full Report (.md)** | ❌ Redacted | Bounty submission, customer engagement, anywhere it leaves your team. Auth header values (Authorization, Cookie, X-API-Key, X-Auth-Token, X-CSRF-Token, X-Amz-Security-Token, etc.) replaced with `<redacted, N chars>`. Includes embedded Hunt Mode drafted reports, stack-attack pack hits, continuous monitor alerts, and Marked-as-Fixed triage state. |
 | **Burp URL list** | URL list only | Paste into Burp's target scope or feed to ffuf/nuclei |
 | **Param wordlist** | Names only | Fuzzing dictionaries — query params + form input names + hidden field names |
+| **Param wordlist (ffuf)** | Names only | Same data emitted as `param=FUZZ` lines for `ffuf -w` |
 | **Endpoints (txt)** | URL list only | Tab-separated method/status/path/host/tags/size — observed + discovered routes |
+| **📤 HAR Export** | Headers + bodies | Full HAR-1.2 capture you can import into Chrome DevTools / a HAR viewer / hand to a teammate |
 | **🔧 Swagger Spec (.yaml)** | URL list only | Reconstructed OpenAPI 3.0 spec from observed traffic |
 | **🗺️ Source Maps (JSON)** | Source extracts only | Full parsed source maps with file trees, secrets, routes, env vars, dependencies |
 | **⚔️ Nuclei Templates (.yaml)** | Probe URLs only | Drop-in `~/.config/nuclei/custom/` for continuous scanning |
@@ -283,10 +308,17 @@ PenScope and Burp solve the same problem from different sides. PenScope lives in
 | **Decoder** (B64/URL/Hex/JWT) | ✅ | ✅ |
 | **Comparer / Diff** | ✅ | ✅ |
 | **Target / Site Map** | ✅ | ✅ |
-| **Active scanner** | ✅ (36 probes + 8 stack packs) | ✅ |
+| **Active scanner** | ✅ (45 probes + 8 stack packs) | ✅ |
 | **Session/auth context handling** | ✅ (saved profiles + matrix) | ✅ (rules-based) |
 | **Authorization matrix tester** | ✅ (built-in) | ❌ (paid extension) |
 | **Chain correlation** (compound findings) | ✅ (13 patterns) | ❌ |
+| **Subdomain takeover heuristic** | ✅ (8 service signatures) | ❌ (paid extension) |
+| **GraphQL DoS surface tests** (alias + batch) | ✅ | ❌ |
+| **Per-endpoint unauth replay button** | ✅ | ❌ |
+| **HAR import + export** | ✅ (round-trip) | ✅ (one-way) |
+| **IndexedDB diff** (catch client-state leaks) | ✅ | ❌ |
+| **CHIPS partitioned cookie capture** | ✅ | ❌ |
+| **JSON island parser** (Next/Nuxt/Remix hydration data) | ✅ | ❌ |
 | **Compliance mapping** (PCI/NESA/SAMA/ISO/OWASP) | ✅ (7 frameworks) | ❌ |
 | **CSP generator from observed traffic** | ✅ | ❌ |
 | **Regression diff** (snapshot + compare) | ✅ | ❌ |
@@ -374,9 +406,9 @@ Override available: **"Full capture on noisy hosts"** checkbox in the Probe drop
 
 ---
 
-## The 36 probe attacks
+## The 45 probe attacks
 
-Run on demand. Three aggression levels. Custom headers paste into every request. Stealth mode shuffles step order with Fisher-Yates and adds 0–80% jitter to inter-step delays.
+Run on demand. Three aggression levels with an enforced contract: **Careful** = GET/HEAD/OPTIONS only with 200ms minimum spacing between requests; **Medium** = adds POST for read-shape operations (≤3 parallel); **Full** = all methods including DELETE/PUT/PATCH plus race-condition bursts (≤10 parallel). Custom headers paste into every request. Stealth mode shuffles step order with Fisher-Yates and adds 0–80% jitter to inter-step delays. Every step's expected method is dry-run-checked against the active tier at probe start; blocked steps are listed in the diagnostic log.
 
 | # | Attack | What it does |
 |---|---|---|
@@ -416,6 +448,15 @@ Run on demand. Three aggression levels. Custom headers paste into every request.
 | 34 | CRLF injection | `%0d%0a` in redirect params |
 | 35 | API version downgrade | `/v1/`, `/v2/` for every observed `/vN/` |
 | 36 | Prototype pollution | `__proto__` / `constructor.prototype` in JSON bodies |
+| 37 | SSRF param probing | 26 SSRF param names with cloud-metadata payloads; flags reflected metadata content |
+| 38 | NoSQL operator injection | `{"$ne":null}` / `{"$gt":""}` / `{"$exists":true}` on JSON ID fields |
+| 39 | GraphQL alias amplification | 50-alias query → DoS amplification surface (full only) |
+| 40 | GraphQL batch amplification | 25-element JSON-array batch → DoS amplification (full only) |
+| 41 | Cache deception | `/api/me/avatar.css` style — sensitive content cached behind static extensions |
+| 42 | Subdomain takeover | HEAD-style probe of captured subdomains; matches GitHub Pages / S3 / Heroku / Netlify / Vercel / Bitbucket / Shopify takeover signatures |
+| 43 | TabNabbing | Cross-origin `<a target="_blank">` without `rel="noopener"` |
+| 44 | postMessage origin correlation | `addEventListener("message")` listeners without origin checks |
+| 45 | Service Worker scope abuse | Flags broad SW scopes (especially `/`) |
 
 Plus **8 stack-aware attack packs** that fire automatically when Red mode detects the matching framework: Laravel, Spring Boot, Rails, ASP.NET, Django, Next.js, GraphQL, WordPress. Each pack has 4–9 stack-specific tests. Spring Boot's pack alone hits `/actuator/heapdump`, `/actuator/env`, `/jolokia/list`, `/h2-console`.
 
@@ -469,30 +510,43 @@ Floor at 10 so a catastrophic site reads "10/100", not "0/100" (which the user c
 
 ```
 PenScope/
-├── manifest.json              MV3 manifest, v6.2.5
-├── background.js              Service worker — webRequest, CDP, probe engine, chain analyzer, page-context runners, noisy-host shortcut, DOM-crawl handler (~6,400 lines)
-├── popup.html                 Mode UI shell — three modes, glassmorphism dark theme (~350 lines)
-├── popup.js                   Renderers, mode router, weaponize panels, fix snippets, compliance, Hunt + Workbench launchers, auth-redacted Markdown export (~3,500 lines)
-├── content.js                 Content script — DOM scanning, secrets, hidden fields, forms, XSS sinks, benign-SAS filter, idle-deferred rescans (~720 lines)
+├── manifest.json              MV3 manifest, v6.3.0, "type":"module" service worker
+├── popup.html                 Mode UI shell — three modes, glassmorphism dark theme
+├── popup.js                   Renderers, mode router, weaponize panels, fix snippets,
+│                              compliance, Hunt + Workbench launchers, exports
+├── content.js                 Content script — DOM scanning, secrets, JSON islands,
+│                              tech fingerprints, XSS sinks, postMessage scan
 │
-├── workbench.html             Workbench full-tab UI shell (~960 lines)
-├── workbench.js               Workbench logic — Repeater/Intruder/Encoder/Diff/SiteMap/AuthCtx (~1,200 lines)
+├── workbench.html / .js       Workbench tab — Repeater / Intruder / Encoder /
+│                              Diff / SiteMap / AuthCtx + AuthMatrix
 │
-├── hunt.html                  Hunt Mode full-tab UI shell + pre-flight indicator (~470 lines)
-├── hunt.js                    Hunt Mode orchestrator (DOM crawl + 36-step probe + Auth Matrix + chain analyzer + report composer + finding fallback + diagnostic logging) (~1,000 lines)
+├── hunt.html / .js            Hunt Mode tab — autonomous orchestrator
 │
-├── red-attacks.js             Reference: STACK_ATTACK_PACKS (8 stacks)
-├── blue-fixes.js              Reference: FIX_SNIPPETS (30+ remediation snippets)
-├── blue-csp.js                Reference: generateTightCSP
-├── blue-compliance.js         Reference: COMPLIANCE_MAP (7 frameworks)
+├── regex-pack.json            81 secret patterns + 44 response-body patterns
+│                              (loaded by SW at boot, merged into RESP_PATTERNS,
+│                              fetched by content script via getRegexPack message)
+│
+├── src/                       Service worker entry + module tree (Phase 7 migration)
+│   ├── background.js          Entry — webRequest, CDP, probe orchestrator,
+│   │                          chain correlator, message router (~7,000 lines)
+│   ├── probe/
+│   │   └── stack-packs.js     STACK_ATTACK_PACKS (8 stacks) — extracted module
+│   └── (other audit-named files are stubs — see MIGRATION.md)
+│
+├── fonts/                     Local woff2: JetBrains Mono + Plus Jakarta Sans
+│                              (4 + 5 weights, ~590 KB total). Replaces the
+│                              Google Fonts beacon that earlier versions hit on
+│                              every popup open.
 │
 ├── icons/                     16, 48, 128 px PNG
-├── CHANGELOG.md               Full version history v5.1 → v6.2.5
+├── CHANGELOG.md               Full version history v5.1 → v6.3.0
+├── CHANGES.md                 v6.3 per-phase fix breakdown
+├── MIGRATION.md               Phase 7 module-migration map (real vs stub)
 ├── LICENSE                    MIT
 └── README.md                  You are here
 ```
 
-The four `*.js` reference files are canonical sources of their dictionaries. The live copies are inlined into `popup.js` / `background.js` because MV3 service workers don't easily import additional scripts and the popup runs as a single bundled script. When you add an entry to a reference file, also paste it into the live copy.
+The four old reference files (`red-attacks.js`, `blue-fixes.js`, `blue-csp.js`, `blue-compliance.js`) were removed in v6.3 — their content was already inlined into `popup.js` / `background.js` since v6.0; the standalone files were dead code. `STACK_ATTACK_PACKS` is now a real ES-module export from `src/probe/stack-packs.js`.
 
 ---
 
@@ -516,11 +570,12 @@ A recon tool that ships with 200 transitive npm dependencies has 200 packages of
 | Permission | Why |
 |---|---|
 | `webRequest` | Capture every request/response without re-fetching |
+| `webNavigation` | Detect SPA `pushState`/`replaceState` route changes (v6.3+) so endpoints from `app.com` don't bleed into the new origin's state when the SPA navigates cross-origin |
 | `activeTab` | Read the current tab's URL + send content-script messages |
 | `scripting` | Inject probe runners, stack packs, and Workbench requests into the page context |
 | `tabs` | Map findings to the correct tab; open the Workbench in a new tab |
 | `cookies` | Read HttpOnly cookies that `document.cookie` can't see |
-| `debugger` | Required for Deep mode — enables CDP for full response bodies, runtime introspection, source extraction, audit issues |
+| `debugger` | Required for Deep mode — enables CDP for full response bodies, runtime introspection, source extraction, audit issues, accessibility tree, partitioned cookies |
 | `notifications` | Continuous monitor alerts on new secret leaks |
 | `alarms` | 5-minute interval ticks for continuous monitor |
 | `storage` | Persist state (`session`) and snapshots (`local`) across SW restarts |
